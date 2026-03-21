@@ -1,0 +1,44 @@
+{
+  "permissions": {
+    "allow": [
+      "mcp__supabase__list_projects",
+      "Bash(claude mcp:*)",
+      "Bash(echo \"exit code: $?\")",
+      "WebFetch(domain:supabase.com)",
+      "WebSearch",
+      "Bash(npm install:*)",
+      "Bash(npm test:*)",
+      "Bash(node -e \"const v = require\\(''voyageai''\\); console.log\\(Object.keys\\(v\\)\\)\")",
+      "Bash(node -e \"const v = require\\(''voyageai''\\); const c = new v.VoyageAIClient\\({apiKey:''test''}\\); console.log\\(typeof c.embed\\)\")",
+      "Bash(node -e \"const pdfParse = require\\(''pdf-parse''\\); console.log\\(typeof pdfParse\\)\")",
+      "Bash(node -e \"const pdfParse = require\\(''pdf-parse''\\); console.log\\(Object.keys\\(pdfParse\\)\\)\")",
+      "Bash(node -e \"const { PDFParse } = require\\(''pdf-parse''\\); const p = new PDFParse\\(\\); console.log\\(typeof p.parse\\)\")",
+      "Bash(node -e \"const { PDFParse } = require\\(''pdf-parse''\\); const p = new PDFParse\\(\\); console.log\\(Object.getOwnPropertyNames\\(Object.getPrototypeOf\\(p\\)\\)\\)\")",
+      "Bash(node -e \"console.log\\(require\\(''./node_modules/pdf-parse/package.json''\\).version\\)\")",
+      "Bash(node -e \"const { VoyageAIClient } = require\\(''voyageai''\\); const c = new VoyageAIClient\\({apiKey:''t''}\\); console.log\\(typeof c.embed\\)\")",
+      "mcp__supabase__list_projects",
+      "Bash(wc -l src/routes/*.ts src/services/*.ts)",
+      "Bash(mkdir -p \"C:\\\\Material Programação\\\\projetos\\\\sr-energy-back\\\\sr-energy-api\\\\mysql\")",
+      "Bash(mkdir -p \"C:\\\\Material Programação\\\\projetos\\\\sr-energy-back\\\\sr-energy-api\\\\src\\\\scripts\")",
+      "Bash(npx tsc:*)",
+      "Skill(update-config)",
+      "Bash(npm run:*)",
+      "Bash(node -e \":*)",
+      "Bash(npm uninstall:*)",
+      "mcp__supabase__list_tables",
+      "mcp__supabase__list_extensions",
+      "mcp__supabase__list_migrations",
+      "mcp__supabase__apply_migration",
+      "mcp__supabase__get_project_url",
+      "mcp__supabase__execute_sql",
+      "mcp__supabase__get_logs",
+      "mcp__plugin_context-mode_context-mode__ctx_doctor",
+      "mcp__plugin_context-mode_context-mode__ctx_batch_execute",
+      "mcp__plugin_context-mode_context-mode__ctx_execute_file"
+    ]
+  },
+  "enableAllProjectMcpServers": true,
+  "enabledMcpjsonServers": [
+    "supabase"
+  ]
+}

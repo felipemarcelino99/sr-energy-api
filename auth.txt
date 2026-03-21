@@ -1,0 +1,11 @@
+          Email          │  Password   │   Role   │
+  ├─────────────────────────┼─────────────┼──────────┤
+  │ admin@srenergy.com.br   │ Admin@123   │ admin    │
+  ├─────────────────────────┼─────────────┼──────────┤
+  │ gerente@srenergy.com.br │ Manager@123 │ manager  │
+  ├─────────────────────────┼─────────────┼──────────┤
+  │ joao@srenergy.com.br    │ Joao@123    │ employee │
+  ├─────────────────────────┼─────────────┼──────────┤
+  │ maria@srenergy.com.br   │ Maria@123   │ employee │
+  ├─────────────────────────┼─────────────┼──────────┤
+  │ pedro@srenergy.com.br   │ Pedro@123   │ employee │
