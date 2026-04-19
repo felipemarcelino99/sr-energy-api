@@ -1,7 +1,9 @@
 import type { FastifyPluginAsync } from 'fastify'
 import { z } from 'zod'
+import { createHash } from 'crypto'
 import { indexMachineManual } from '@/services/rag.service'
 import { uploadFile } from '@/services/storage.service'
+import { getOrGenerateOverview } from '@/services/rag.overview.service'
 
 const machineBody = z.object({
   name: z.string().min(2),
@@ -108,15 +110,28 @@ const machines: FastifyPluginAsync = async (fastify) => {
   })
 
   // POST /machines/:id/manual
-  fastify.post<{ Params: { id: string } }>('/:id/manual', { onRequest: [guard] }, async (req, reply) => {
+  fastify.post<{ Params: { id: string } }>('/:id/manual', { onRequest: [guard] }, async (req: any, reply) => {
+    if (!['manager', 'admin'].includes(req.user.role))
+      return reply.status(403).send({ error: 'Acesso negado' })
     const file = await req.file()
     if (!file) return reply.status(400).send({ error: 'Arquivo não enviado' })
     const buffer = await file.toBuffer()
+    const pdfHash = createHash('sha256').update(buffer).digest('hex')
     const url = await uploadFile(fastify.supabase, 'machine-manuals', `${req.params.id}.pdf`, buffer, 'application/pdf')
-    await db.from('machines').update({ manual_url: url, updated_at: new Date().toISOString() }).eq('id', req.params.id)
-    // Indexa async (não bloqueia a resposta)
+    await db.from('machines').update({ manual_url: url, pdf_hash: pdfHash, updated_at: new Date().toISOString() }).eq('id', req.params.id)
     indexMachineManual(fastify.supabase, req.params.id, buffer).catch(console.error)
     return { url }
+  })
+
+  // GET /machines/:id/overview
+  fastify.get<{ Params: { id: string } }>('/:id/overview', { onRequest: [guard] }, async (req, reply) => {
+    try {
+      const overview = await getOrGenerateOverview(fastify.supabase, req.params.id)
+      return { overview }
+    } catch (err: any) {
+      if (err.message?.includes('não indexado')) return reply.status(404).send({ error: err.message })
+      return reply.status(502).send({ error: 'Erro ao gerar overview. Tente novamente.' })
+    }
   })
 }
 

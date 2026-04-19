@@ -1,7 +1,6 @@
 import Anthropic from '@anthropic-ai/sdk'
 import type { SupabaseClient } from '@supabase/supabase-js'
 
-const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY })
 const CLAUDE_MODEL = 'claude-haiku-4-5-20251001'
 
 export async function getOrGenerateOverview(
@@ -34,6 +33,7 @@ export async function getOrGenerateOverview(
 
   const context = (chunks as { content: string }[]).map((c) => c.content).join('\n\n---\n\n')
 
+  const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY })
   const message = await anthropic.messages.create({
     model: CLAUDE_MODEL,
     max_tokens: 2048,
