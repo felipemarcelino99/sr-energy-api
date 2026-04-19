@@ -1,0 +1,42 @@
+services:
+  - type: web
+    name: sr-energy-api
+    runtime: node
+    rootDir: sr-energy-api
+    buildCommand: npm install && npm run build
+    startCommand: npm start
+    envVars:
+      - key: PORT
+        value: 3000
+      - key: NODE_ENV
+        value: production
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+      - key: SUPABASE_JWT_SECRET
+        sync: false
+      - key: SUPABASE_TOKEN
+        sync: false
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: VOYAGE_API_KEY
+        sync: false
+      - key: FRONTEND_URL
+        sync: false
+      - key: POSTGRESS_PASSWORD
+        sync: false
+      - key: GOOGLE_CLIENT_ID
+        sync: false
+      - key: GOOGLE_CLIENT_SECRET
+        sync: false
+      - key: GOOGLE_REDIRECT_URI
+        sync: false
+      - key: GOOGLE_ADMIN_REFRESH_TOKEN
+        sync: false
+      - key: GOOGLE_ADMIN_CALENDAR_ID
+        sync: false
+      - key: OAUTH_STATE_SECRET
+        sync: false
+      - key: TOKEN_ENCRYPTION_KEY
+        sync: false
