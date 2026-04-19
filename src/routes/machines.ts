@@ -65,6 +65,48 @@ const machines: FastifyPluginAsync = async (fastify) => {
     })
   })
 
+  // GET /machines/:id/tools
+  fastify.get<{ Params: { id: string } }>('/:id/tools', { onRequest: [guard] }, async (req, reply) => {
+    const { data, error } = await db
+      .from('machine_tools')
+      .select('*, tools(*)')
+      .eq('machine_id', req.params.id)
+      .order('created_at' as any)
+    if (error) return reply.status(500).send({ error: error.message })
+    return data ?? []
+  })
+
+  // POST /machines/:id/tools
+  fastify.post<{ Params: { id: string } }>('/:id/tools', { onRequest: [guard] }, async (req: any, reply) => {
+    if (!['manager', 'admin'].includes(req.user.role))
+      return reply.status(403).send({ error: 'Forbidden' })
+    const parsed = z.object({
+      tool_id: z.string().uuid(),
+      quantity_required: z.coerce.number().int().min(1).default(1),
+    }).safeParse(req.body)
+    if (!parsed.success) return reply.status(400).send({ error: parsed.error.flatten() })
+    const { data, error } = await db
+      .from('machine_tools')
+      .insert({ machine_id: req.params.id, ...parsed.data })
+      .select('*, tools(*)')
+      .single()
+    if (error) return reply.status(500).send({ error: error.message })
+    return reply.status(201).send(data)
+  })
+
+  // DELETE /machines/:id/tools/:toolId
+  fastify.delete<{ Params: { id: string; toolId: string } }>('/:id/tools/:toolId', { onRequest: [guard] }, async (req: any, reply) => {
+    if (!['manager', 'admin'].includes(req.user.role))
+      return reply.status(403).send({ error: 'Forbidden' })
+    const { error } = await db
+      .from('machine_tools')
+      .delete()
+      .eq('machine_id', req.params.id)
+      .eq('tool_id', req.params.toolId)
+    if (error) return reply.status(500).send({ error: error.message })
+    return reply.status(204).send()
+  })
+
   // POST /machines/:id/manual
   fastify.post<{ Params: { id: string } }>('/:id/manual', { onRequest: [guard] }, async (req, reply) => {
     const file = await req.file()
