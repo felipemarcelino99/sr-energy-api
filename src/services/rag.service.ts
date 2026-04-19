@@ -2,9 +2,7 @@ import pdfParse from 'pdf-parse'
 import Anthropic from '@anthropic-ai/sdk'
 import { VoyageAIClient } from 'voyageai'
 import type { SupabaseClient } from '@supabase/supabase-js'
-
-const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY })
-const voyage = new VoyageAIClient({ apiKey: process.env.VOYAGE_API_KEY })
+import { findCuratedAnswer } from '@/services/rag.curated.service'
 
 const EMBEDDING_MODEL = 'voyage-3'
 const CLAUDE_MODEL = 'claude-haiku-4-5-20251001'
@@ -31,6 +29,7 @@ async function extractText(pdfBuffer: Buffer): Promise<string> {
 
 /** Embeda um array de strings via Voyage AI */
 export async function embedTexts(texts: string[]): Promise<number[][]> {
+  const voyage = new VoyageAIClient({ apiKey: process.env.VOYAGE_API_KEY })
   const result = await voyage.embed({ input: texts, model: EMBEDDING_MODEL })
   return (result.data as { embedding: number[] }[]).map((d) => d.embedding)
 }
@@ -68,7 +67,11 @@ export async function answerQuestion(
   // 1. Embed a pergunta
   const [queryEmbedding] = await embedTexts([question])
 
-  // 2. Buscar top-5 chunks via pgvector
+  // 2. Verificar resposta curada
+  const curated = await findCuratedAnswer(supabase, machineId, queryEmbedding)
+  if (curated) return curated
+
+  // 3. Buscar top-5 chunks via pgvector
   const { data: chunks, error } = await supabase.rpc('match_machine_chunks', {
     p_machine_id: machineId,
     p_embedding: queryEmbedding,
@@ -81,6 +84,7 @@ export async function answerQuestion(
   const context = (chunks as { content: string }[]).map((c) => c.content).join('\n\n---\n\n')
 
   // 3. Chamar Claude
+  const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY })
   const message = await anthropic.messages.create({
     model: CLAUDE_MODEL,
     max_tokens: 1024,
@@ -126,6 +130,7 @@ export async function compareAcrossMachines(
     context += `\nNota: as seguintes máquinas não possuem manual indexado: ${machinesWithNoData.join(', ')}`
   }
 
+  const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY })
   const message = await anthropic.messages.create({
     model: CLAUDE_MODEL,
     max_tokens: 1024,
