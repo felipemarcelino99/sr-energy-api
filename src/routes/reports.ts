@@ -43,6 +43,19 @@ const reports: FastifyPluginAsync = async (fastify) => {
     return reply.status(201).send(data)
   })
 
+  // PUT /jobs/:id/report
+  fastify.put<{ Params: { id: string } }>('/jobs/:id/report', { onRequest: [guard] }, async (req: any, reply) => {
+    const parsed = reportBody.safeParse(req.body)
+    if (!parsed.success) return reply.status(400).send({ error: parsed.error.flatten() })
+    const { data, error } = await db.from('job_reports')
+      .update({ content: parsed.data.content, updated_at: new Date().toISOString() })
+      .eq('job_id', req.params.id)
+      .select('*, evidences(*)')
+      .single()
+    if (error || !data) return reply.status(404).send({ error: 'Report not found' })
+    return data
+  })
+
   // POST /reports/:id/evidences
   fastify.post<{ Params: { id: string } }>('/reports/:id/evidences', { onRequest: [guard] }, async (req, reply) => {
     const file = await req.file()
