@@ -30,7 +30,7 @@ async function extractText(pdfBuffer: Buffer): Promise<string> {
 }
 
 /** Embeda um array de strings via Voyage AI */
-async function embedTexts(texts: string[]): Promise<number[][]> {
+export async function embedTexts(texts: string[]): Promise<number[][]> {
   const result = await voyage.embed({ input: texts, model: EMBEDDING_MODEL })
   return (result.data as { embedding: number[] }[]).map((d) => d.embedding)
 }
@@ -88,6 +88,49 @@ export async function answerQuestion(
     messages: [
       { role: 'user', content: `Contexto do manual:\n${context}\n\nPergunta: ${question}` },
     ],
+  })
+
+  const block = message.content[0]
+  if (block.type !== 'text') throw new Error('Unexpected response type from Claude')
+  return block.text
+}
+
+/** Busca chunks de múltiplas máquinas e retorna resposta comparativa */
+export async function compareAcrossMachines(
+  supabase: SupabaseClient,
+  machineIds: string[],
+  question: string
+): Promise<string> {
+  const [queryEmbedding] = await embedTexts([question])
+
+  const { data: chunks, error } = await supabase.rpc('match_chunks_multi_machine', {
+    p_machine_ids: machineIds,
+    p_embedding: queryEmbedding,
+    p_limit_per: 5,
+  })
+  if (error) throw new Error(`Vector search failed: ${error.message}`)
+
+  const byMachine = new Map<string, string[]>()
+  for (const chunk of (chunks as { machine_id: string; content: string }[])) {
+    if (!byMachine.has(chunk.machine_id)) byMachine.set(chunk.machine_id, [])
+    byMachine.get(chunk.machine_id)!.push(chunk.content)
+  }
+
+  const machinesWithNoData = machineIds.filter((id) => !byMachine.has(id))
+
+  let context = ''
+  for (const [machineId, contents] of byMachine) {
+    context += `=== Máquina ${machineId} ===\n${contents.join('\n\n')}\n\n`
+  }
+  if (machinesWithNoData.length > 0) {
+    context += `\nNota: as seguintes máquinas não possuem manual indexado: ${machinesWithNoData.join(', ')}`
+  }
+
+  const message = await anthropic.messages.create({
+    model: CLAUDE_MODEL,
+    max_tokens: 1024,
+    system: `Você é um assistente técnico especializado. Compare as informações das máquinas com base nos manuais fornecidos. Se alguma máquina não tiver dados, mencione isso na resposta.`,
+    messages: [{ role: 'user', content: `${context}\n\nPergunta: ${question}` }],
   })
 
   const block = message.content[0]
