@@ -2,8 +2,8 @@ services:
   - type: web
     name: sr-energy-api
     runtime: node
-    buildCommand: cd sr-energy-api && npm install && npm run build
-    startCommand: node sr-energy-api/dist/index.js
+    buildCommand: npm install && npm run build
+    startCommand: node dist/index.js
     envVars:
       - key: PORT
         value: 3000
