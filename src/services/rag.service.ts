@@ -34,22 +34,23 @@ export async function embedTexts(texts: string[]): Promise<number[][]> {
   return (result.data as { embedding: number[] }[]).map((d) => d.embedding)
 }
 
-/** Indexa o manual de uma máquina (chamado após upload) */
+/** Indexa um documento de uma máquina (chamado após upload) */
 export async function indexMachineManual(
   supabase: SupabaseClient,
   machineId: string,
+  documentId: string,
   pdfBuffer: Buffer
 ): Promise<void> {
   const text = await extractText(pdfBuffer)
   const chunks = chunkText(text)
   const embeddings = await embedTexts(chunks)
 
-  // Remove chunks antigos da máquina
-  await supabase.from('machine_chunks').delete().eq('machine_id', machineId)
+  // Remove chunks antigos apenas deste documento
+  await supabase.from('machine_chunks').delete().eq('document_id', documentId)
 
-  // Upsert novos chunks
   const rows = chunks.map((content, i) => ({
     machine_id: machineId,
+    document_id: documentId,
     content,
     embedding: embeddings[i],
     chunk_index: i,

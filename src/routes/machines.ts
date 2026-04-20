@@ -109,6 +109,16 @@ const machines: FastifyPluginAsync = async (fastify) => {
     return reply.status(204).send()
   })
 
+  // GET /machines/:id/documents
+  fastify.get<{ Params: { id: string } }>('/:id/documents', { onRequest: [guard] }, async (req, reply) => {
+    const { data, error } = await db.from('machine_documents')
+      .select('id, filename, url, created_at')
+      .eq('machine_id', req.params.id)
+      .order('created_at', { ascending: false })
+    if (error) return reply.status(500).send({ error: error.message })
+    return data ?? []
+  })
+
   // POST /machines/:id/manual
   fastify.post<{ Params: { id: string } }>('/:id/manual', { onRequest: [guard] }, async (req: any, reply) => {
     if (!['manager', 'admin'].includes(req.user.role))
@@ -116,12 +126,44 @@ const machines: FastifyPluginAsync = async (fastify) => {
     const file = await req.file()
     if (!file) return reply.status(400).send({ error: 'Arquivo não enviado' })
     const buffer = await file.toBuffer()
+    const filename = file.filename || 'manual.pdf'
     const pdfHash = createHash('sha256').update(buffer).digest('hex')
-    const url = await uploadFile(fastify.supabase, 'machine-manuals', `${req.params.id}.pdf`, buffer, 'application/pdf')
-    await db.from('machines').update({ manual_url: url, pdf_hash: pdfHash, updated_at: new Date().toISOString() }).eq('id', req.params.id)
-    indexMachineManual(fastify.supabase, req.params.id, buffer).catch(console.error)
-    return { url }
+
+    // Bloqueia duplicatas
+    const { data: dup } = await db.from('machine_documents')
+      .select('id').eq('machine_id', req.params.id).eq('pdf_hash', pdfHash).single()
+    if (dup) return reply.status(409).send({ error: 'Este arquivo já foi enviado anteriormente.' })
+
+    // Cria registro do documento
+    const { data: doc, error: docError } = await db.from('machine_documents')
+      .insert({ machine_id: req.params.id, filename, pdf_hash: pdfHash, url: '' })
+      .select('id').single()
+    if (docError || !doc) return reply.status(500).send({ error: docError?.message })
+
+    const storagePath = `${req.params.id}/${doc.id}.pdf`
+    const url = await uploadFile(fastify.supabase, 'machine-manuals', storagePath, buffer, 'application/pdf')
+    await db.from('machine_documents').update({ url }).eq('id', doc.id)
+
+    indexMachineManual(fastify.supabase, req.params.id, doc.id, buffer).catch(console.error)
+    return reply.status(201).send({ id: doc.id, filename, url })
   })
+
+  // DELETE /machines/:id/documents/:docId
+  fastify.delete<{ Params: { id: string; docId: string } }>(
+    '/:id/documents/:docId',
+    { onRequest: [guard] },
+    async (req: any, reply) => {
+      if (!['manager', 'admin'].includes(req.user.role))
+        return reply.status(403).send({ error: 'Acesso negado' })
+      const { data: doc } = await db.from('machine_documents')
+        .select('id').eq('id', req.params.docId).eq('machine_id', req.params.id).single()
+      if (!doc) return reply.status(404).send({ error: 'Documento não encontrado' })
+      await fastify.supabase.storage.from('machine-manuals')
+        .remove([`${req.params.id}/${req.params.docId}.pdf`])
+      await db.from('machine_documents').delete().eq('id', req.params.docId)
+      return reply.status(204).send()
+    }
+  )
 
   // GET /machines/:id/overview
   fastify.get<{ Params: { id: string } }>('/:id/overview', { onRequest: [guard] }, async (req, reply) => {
