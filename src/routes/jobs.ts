@@ -15,6 +15,11 @@ const jobBody = z.object({
   start_time: z.string().min(1),
   end_time: z.string().min(1),
   notes: z.string().optional(),
+  address: z.string().optional(),
+  car_pickup_time: z.string().optional(),
+  car_return_time: z.string().optional(),
+  car_pickup_address: z.string().optional(),
+  os_code: z.string().optional(),
 })
 
 const jobs: FastifyPluginAsync = async (fastify) => {

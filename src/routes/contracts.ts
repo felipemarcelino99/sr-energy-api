@@ -10,6 +10,9 @@ const contractBody = z.object({
   description: z.string().min(1).max(2000),
   start_date: z.string().min(1),
   end_date: z.string().min(1),
+  contract_type: z.enum(['service', 'rental']).optional(),
+  contract_value: z.number().min(0).optional(),
+  recurring: z.boolean().optional(),
 }).refine(d => new Date(d.end_date) >= new Date(d.start_date), {
   message: 'end_date must be after start_date', path: ['end_date'],
 })
@@ -46,7 +49,7 @@ const contracts: FastifyPluginAsync = async (fastify) => {
     const in30 = new Date(Date.now() + 30 * 86400000).toISOString().slice(0, 10)
     // MED-04: select explícito
     const { data, error } = await db.from('contracts')
-      .select('id, client_name, client_cnpj, description, start_date, end_date, file_url, created_at, updated_at')
+      .select('id, client_name, client_cnpj, description, start_date, end_date, contract_type, contract_value, recurring, file_url, created_at, updated_at')
       .gte('end_date', today).lte('end_date', in30).order('end_date')
     if (error) return reply.status(500).send({ error: error.message })
     return data
@@ -55,7 +58,7 @@ const contracts: FastifyPluginAsync = async (fastify) => {
   fastify.get('/', { onRequest: [guard] }, async (_req, reply) => {
     // MED-04: select explícito
     const { data, error } = await db.from('contracts')
-      .select('id, client_name, client_cnpj, description, start_date, end_date, file_url, created_at, updated_at')
+      .select('id, client_name, client_cnpj, description, start_date, end_date, contract_type, contract_value, recurring, file_url, created_at, updated_at')
       .order('end_date')
     if (error) return reply.status(500).send({ error: error.message })
     return data
@@ -66,7 +69,7 @@ const contracts: FastifyPluginAsync = async (fastify) => {
     { onRequest: [guard], schema: { params: uuidParams } },
     async (req, reply) => {
       const { data, error } = await db.from('contracts')
-        .select('id, client_name, client_cnpj, description, start_date, end_date, file_url, created_at, updated_at')
+        .select('id, client_name, client_cnpj, description, start_date, end_date, contract_type, contract_value, recurring, file_url, created_at, updated_at')
         .eq('id', req.params.id).single()
       if (error || !data) return reply.status(404).send({ error: 'Not found' })
       return data
