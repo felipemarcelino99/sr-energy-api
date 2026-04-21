@@ -1,7 +1,7 @@
-import Anthropic from '@anthropic-ai/sdk'
+import Groq from 'groq-sdk'
 import type { SupabaseClient } from '@supabase/supabase-js'
 
-const CLAUDE_MODEL = 'claude-haiku-4-5-20251001'
+const GROQ_MODEL = 'llama-3.3-70b-versatile'
 
 export async function getOrGenerateOverview(
   supabase: SupabaseClient,
@@ -33,17 +33,21 @@ export async function getOrGenerateOverview(
 
   const context = (chunks as { content: string }[]).map((c) => c.content).join('\n\n---\n\n')
 
-  const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY })
-  const message = await anthropic.messages.create({
-    model: CLAUDE_MODEL,
+  const groq = new Groq({ apiKey: process.env.GROQ_API_KEY })
+  const completion = await groq.chat.completions.create({
+    model: GROQ_MODEL,
     max_tokens: 2048,
-    system: `Você é um assistente técnico especializado. Gere um overview estruturado do manual da máquina "${machine.name}" com as seções: **Especificações Principais**, **Manutenção Preventiva**, **Alertas de Segurança**, **Orientações do Fabricante**. Use apenas as informações do contexto fornecido.`,
-    messages: [{ role: 'user', content: `Contexto do manual:\n${context}\n\nGere o overview estruturado.` }],
+    messages: [
+      {
+        role: 'system',
+        content: `Você é um assistente técnico especializado. Gere um overview estruturado do manual da máquina "${machine.name}" com as seções: **Especificações Principais**, **Manutenção Preventiva**, **Alertas de Segurança**, **Orientações do Fabricante**. Use apenas as informações do contexto fornecido.`,
+      },
+      { role: 'user', content: `Contexto do manual:\n${context}\n\nGere o overview estruturado.` },
+    ],
   })
 
-  const block = message.content[0]
-  if (block.type !== 'text') throw new Error('Unexpected response from Claude')
-  const content = block.text
+  const content = completion.choices[0]?.message?.content
+  if (!content) throw new Error('Resposta vazia do Groq')
 
   await supabase.from('machine_overviews').upsert(
     { machine_id: machineId, content, pdf_hash: machine.pdf_hash, generated_at: new Date().toISOString() },
