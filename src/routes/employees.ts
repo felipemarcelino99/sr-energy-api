@@ -56,8 +56,27 @@ const employees: FastifyPluginAsync = async (fastify) => {
   fastify.post('/', { onRequest: [guard, adminOrManager] }, async (req, reply) => {
     const parsed = employeeBody.safeParse(req.body)
     if (!parsed.success) return reply.status(400).send({ error: parsed.error.flatten() })
+
     const { data, error } = await db.from('employees').insert(parsed.data).select(SAFE_COLUMNS).single()
     if (error) return reply.status(500).send({ error: error.message })
+
+    // Cria usuário no Supabase Auth com senha padrão
+    const { data: authData, error: authError } = await db.auth.admin.createUser({
+      email: parsed.data.email,
+      password: 'srenergy@123',
+      email_confirm: true,
+      user_metadata: { role: parsed.data.role, name: parsed.data.name },
+    })
+
+    if (!authError && authData?.user) {
+      const userId = authData.user.id
+      await Promise.all([
+        db.from('user_roles').insert({ user_id: userId, role: parsed.data.role }),
+        db.from('employees').update({ user_id: userId }).eq('id', data.id),
+      ])
+      return reply.status(201).send({ ...data, user_id: userId })
+    }
+
     return reply.status(201).send(data)
   })
 

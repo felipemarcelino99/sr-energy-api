@@ -1,5 +1,8 @@
 import { buildApp, mockSupabase } from '../helpers/build-app'
 import machinesRoute from '@/routes/machines'
+import * as overviewService from '@/services/rag.overview.service'
+
+jest.mock('@/services/rag.overview.service')
 
 const mgr = JSON.stringify({ id: 'mgr-1', role: 'manager', name: 'Mgr', email: 'm@sr.com' })
 const emp = JSON.stringify({ id: 'emp-1', role: 'employee', name: 'João', email: 'j@sr.com' })
@@ -109,5 +112,41 @@ describe('DELETE /machines/:id/tools/:toolId', () => {
     })
     const res = await app.inject({ method: 'DELETE', url: '/machines/m-1/tools/t-1', headers: { 'x-test-user': mgr } })
     expect(res.statusCode).toBe(204)
+  })
+})
+
+describe('GET /machines/:id/overview', () => {
+  it('returns cached overview', async () => {
+    const app = buildApp()
+    app.register(machinesRoute, { prefix: '/machines' })
+    await app.ready()
+    jest.mocked(overviewService.getOrGenerateOverview).mockResolvedValue('Overview da máquina.')
+    const res = await app.inject({ method: 'GET', url: '/machines/machine-1/overview', headers: { 'x-test-user': emp } })
+    expect(res.statusCode).toBe(200)
+    expect(res.json().overview).toBe('Overview da máquina.')
+  })
+
+  it('returns 404 when manual is not indexed', async () => {
+    const app = buildApp()
+    app.register(machinesRoute, { prefix: '/machines' })
+    await app.ready()
+    jest.mocked(overviewService.getOrGenerateOverview).mockRejectedValue(
+      new Error('Manual não indexado para esta máquina')
+    )
+    const res = await app.inject({ method: 'GET', url: '/machines/machine-1/overview', headers: { 'x-test-user': emp } })
+    expect(res.statusCode).toBe(404)
+  })
+})
+
+describe('POST /machines/:id/manual — admin guard', () => {
+  it('returns 403 for employee role', async () => {
+    const app = buildApp()
+    app.register(machinesRoute, { prefix: '/machines' })
+    await app.ready()
+    const res = await app.inject({
+      method: 'POST', url: '/machines/machine-1/manual',
+      headers: { 'x-test-user': emp },
+    })
+    expect(res.statusCode).toBe(403)
   })
 })
