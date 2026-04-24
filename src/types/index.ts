@@ -26,9 +26,11 @@ export interface Machine {
 }
 
 export interface Contract {
-  id: string; client_name: string; client_cnpj: string; description: string
-  start_date: string; end_date: string; file_url?: string
+  id: string; client_id: string | null; description: string
+  start_date: string; end_date: string; contract_type?: string
+  contract_value?: number; recurring?: boolean; file_url?: string
   created_at: string; updated_at: string
+  clients?: { id: string; razao_social: string; cnpj: string } | null
 }
 
 export interface Job {
