@@ -18,6 +18,7 @@ import scheduleEventsRoute from '@/routes/schedule-events'
 import googleAuthRoute from '@/routes/google-auth'
 import toolsRoute from '@/routes/tools'
 import bagsRoute from '@/routes/bags'
+import clientsRoute from '@/routes/clients'
 
 export function buildApp() {
   // HIGH-03: FRONTEND_URL obrigatória em produção
@@ -70,6 +71,7 @@ export function buildApp() {
   app.register(googleAuthRoute, { prefix: '/auth/google' })
   app.register(toolsRoute, { prefix: '/tools' })
   app.register(bagsRoute, { prefix: '/bags' })
+  app.register(clientsRoute, { prefix: '/clients' })
 
   app.get('/health', async () => ({ status: 'ok' }))
 

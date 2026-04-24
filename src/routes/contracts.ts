@@ -5,8 +5,7 @@ import { requireRoles } from '@/plugins/authorize'
 
 // HIGH-06: whitelist de campos
 const contractBody = z.object({
-  client_name: z.string().min(2).max(200),
-  client_cnpj: z.string().min(14).max(18),
+  client_id: z.string().uuid('Cliente é obrigatório'),
   description: z.string().min(1).max(2000),
   start_date: z.string().min(1),
   end_date: z.string().min(1),
@@ -38,6 +37,8 @@ function detectMimeFromBuffer(buf: Buffer): string | null {
   return null
 }
 
+const SELECT_CONTRACT = 'id, client_id, description, start_date, end_date, contract_type, contract_value, recurring, file_url, created_at, updated_at, clients(id, razao_social, cnpj)'
+
 const contracts: FastifyPluginAsync = async (fastify) => {
   const db = fastify.supabase
   const guard = (fastify as any).authenticate
@@ -47,19 +48,21 @@ const contracts: FastifyPluginAsync = async (fastify) => {
   fastify.get('/expiring', { onRequest: [guard] }, async (_req, reply) => {
     const today = new Date().toISOString().slice(0, 10)
     const in30 = new Date(Date.now() + 30 * 86400000).toISOString().slice(0, 10)
-    // MED-04: select explícito
     const { data, error } = await db.from('contracts')
-      .select('id, client_name, client_cnpj, description, start_date, end_date, contract_type, contract_value, recurring, file_url, created_at, updated_at')
+      .select(SELECT_CONTRACT)
       .gte('end_date', today).lte('end_date', in30).order('end_date')
     if (error) return reply.status(500).send({ error: error.message })
     return data
   })
 
-  fastify.get('/', { onRequest: [guard] }, async (_req, reply) => {
-    // MED-04: select explícito
-    const { data, error } = await db.from('contracts')
-      .select('id, client_name, client_cnpj, description, start_date, end_date, contract_type, contract_value, recurring, file_url, created_at, updated_at')
-      .order('end_date')
+  // GET /contracts — suporta ?clientId= (query param não é convertido pelo axios)
+  fastify.get('/', { onRequest: [guard] }, async (req, reply) => {
+    const { clientId } = req.query as { clientId?: string }
+    let query = db.from('contracts').select(SELECT_CONTRACT).order('end_date')
+    if (clientId) {
+      query = query.eq('client_id', clientId)
+    }
+    const { data, error } = await query
     if (error) return reply.status(500).send({ error: error.message })
     return data
   })
@@ -69,7 +72,7 @@ const contracts: FastifyPluginAsync = async (fastify) => {
     { onRequest: [guard], schema: { params: uuidParams } },
     async (req, reply) => {
       const { data, error } = await db.from('contracts')
-        .select('id, client_name, client_cnpj, description, start_date, end_date, contract_type, contract_value, recurring, file_url, created_at, updated_at')
+        .select(SELECT_CONTRACT)
         .eq('id', req.params.id).single()
       if (error || !data) return reply.status(404).send({ error: 'Not found' })
       return data
@@ -80,7 +83,7 @@ const contracts: FastifyPluginAsync = async (fastify) => {
   fastify.post('/', { onRequest: [guard, adminOrManager] }, async (req, reply) => {
     const parsed = contractBody.safeParse(req.body)
     if (!parsed.success) return reply.status(400).send({ error: parsed.error.flatten() })
-    const { data, error } = await db.from('contracts').insert(parsed.data).select().single()
+    const { data, error } = await db.from('contracts').insert(parsed.data).select(SELECT_CONTRACT).single()
     if (error) return reply.status(500).send({ error: error.message })
     return reply.status(201).send(data)
   })
@@ -89,11 +92,11 @@ const contracts: FastifyPluginAsync = async (fastify) => {
     '/:id',
     { onRequest: [guard, adminOrManager], schema: { params: uuidParams } },
     async (req, reply) => {
-      const parsed = contractBody.safeParse(req.body)
+      const parsed = contractBody.partial().safeParse(req.body)
       if (!parsed.success) return reply.status(400).send({ error: parsed.error.flatten() })
       const { data, error } = await db.from('contracts')
         .update({ ...parsed.data, updated_at: new Date().toISOString() })
-        .eq('id', req.params.id).select().single()
+        .eq('id', req.params.id).select(SELECT_CONTRACT).single()
       if (error || !data) return reply.status(404).send({ error: 'Not found' })
       return data
     },
@@ -118,7 +121,6 @@ const contracts: FastifyPluginAsync = async (fastify) => {
       if (!file) return reply.status(400).send({ error: 'Arquivo não enviado' })
       const buffer = await file.toBuffer()
 
-      // HIGH-07: verificar magic bytes reais do arquivo
       const detectedMime = detectMimeFromBuffer(buffer)
       if (!detectedMime) {
         return reply.status(400).send({ error: 'Tipo de arquivo não permitido. Envie PDF, JPEG ou PNG.' })
