@@ -11,6 +11,28 @@ declare module 'fastify' {
   }
 }
 
+// item 6: cache curto de role por usuário para evitar bater em `user_roles`
+// em toda requisição autenticada. Roles mudam raramente (promoção/rebaixamento
+// de um funcionário), então um TTL curto é um trade-off aceitável entre
+// performance e "tempo até a mudança de role propagar" — pior caso: até
+// ROLE_CACHE_TTL_MS de atraso para uma role revogada parar de valer.
+const ROLE_CACHE_TTL_MS = 60_000
+const roleCache = new Map<string, { role: Role; expiresAt: number }>()
+
+function getCachedRole(userId: string): Role | undefined {
+  const entry = roleCache.get(userId)
+  if (!entry) return undefined
+  if (entry.expiresAt < Date.now()) {
+    roleCache.delete(userId)
+    return undefined
+  }
+  return entry.role
+}
+
+function setCachedRole(userId: string, role: Role): void {
+  roleCache.set(userId, { role, expiresAt: Date.now() + ROLE_CACHE_TTL_MS })
+}
+
 const authPlugin: FastifyPluginAsync = async (fastify) => {
   fastify.decorate('authenticate', async (req: FastifyRequest) => {
     const authHeader = req.headers.authorization
@@ -35,17 +57,24 @@ const authPlugin: FastifyPluginAsync = async (fastify) => {
       throw { statusCode: 401, message: 'Unauthorized' }
     }
 
-    // CRIT-02: Buscar role da tabela user_roles (não de user_metadata)
-    const { data: roleRow } = await fastify.supabase
-      .from('user_roles')
-      .select('role')
-      .eq('user_id', user.id)
-      .single()
+    // CRIT-02: Buscar role da tabela user_roles (não de user_metadata).
+    // item 6: usa cache curto em memória para evitar essa query em toda
+    // requisição autenticada — só bate no banco quando expira ou nunca foi lida.
+    let role = getCachedRole(user.id)
+    if (!role) {
+      const { data: roleRow } = await fastify.supabase
+        .from('user_roles')
+        .select('role')
+        .eq('user_id', user.id)
+        .single()
+      role = ((roleRow?.role) ?? 'employee') as Role
+      setCachedRole(user.id, role)
+    }
 
     req.user = {
       id: user.id,
       email: user.email!,
-      role: ((roleRow?.role) ?? 'employee') as Role,
+      role,
       name: user.user_metadata?.name ?? user.email!,
     }
   })

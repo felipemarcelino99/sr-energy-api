@@ -5,6 +5,7 @@ import {
   deleteCalendarEvent,
   cancelCalendarEvent,
 } from "@/services/google-calendar.service";
+import { requireRoles } from "@/plugins/authorize";
 
 const scheduleEventBody = z
   .object({
@@ -21,25 +22,27 @@ const scheduleEventBody = z
     path: ["end_date"],
   });
 
-async function buildEventResponse(db: any, event: any) {
-  const { data: links } = await db
-    .from("schedule_event_employees")
-    .select("employee_id, employees(name)")
-    .eq("schedule_event_id", event.id);
-
+// item 5: monta a resposta a partir do embed relacional já trazido pela query
+// (schedule_event_employees(employee_id, employees(name))) em vez de disparar
+// uma query extra por evento — elimina o N+1 de GET /schedule-events.
+function toEventResponse(event: any) {
+  const links = event.schedule_event_employees ?? [];
   const employee_ids: string[] = [];
   const employee_names: string[] = [];
-  for (const link of links ?? []) {
+  for (const link of links) {
     employee_ids.push(link.employee_id);
     employee_names.push(link.employees?.name ?? "");
   }
-
-  return { ...event, employee_ids, employee_names };
+  const { schedule_event_employees, ...rest } = event;
+  return { ...rest, employee_ids, employee_names };
 }
+
+const EVENT_SELECT = "*, schedule_event_employees(employee_id, employees(name))";
 
 const scheduleEventsRoute: FastifyPluginAsync = async (fastify) => {
   const db = fastify.supabase;
   const guard = (fastify as any).authenticate;
+  const adminOrManager = requireRoles("admin", "manager");
 
   // GET /schedule-events?month=YYYY-MM&employeeId=uuid
   fastify.get<{ Querystring: { month?: string; employeeId?: string } }>(
@@ -48,7 +51,7 @@ const scheduleEventsRoute: FastifyPluginAsync = async (fastify) => {
     async (req, reply) => {
       const { month, employeeId } = req.query;
 
-      let query = db.from("schedule_events").select("*");
+      let query = db.from("schedule_events").select(EVENT_SELECT);
 
       // Filtra eventos que se sobrepõem ao mês informado
       if (month) {
@@ -75,10 +78,7 @@ const scheduleEventsRoute: FastifyPluginAsync = async (fastify) => {
       });
       if (error) return reply.status(500).send({ error: error.message });
 
-      const results = await Promise.all(
-        (data ?? []).map((e: any) => buildEventResponse(db, e)),
-      );
-      return results;
+      return (data ?? []).map(toEventResponse);
     },
   );
 
@@ -89,88 +89,85 @@ const scheduleEventsRoute: FastifyPluginAsync = async (fastify) => {
     async (req, reply) => {
       const { data, error } = await db
         .from("schedule_events")
-        .select("*")
+        .select(EVENT_SELECT)
         .eq("id", req.params.id)
         .single();
 
       if (error || !data) return reply.status(404).send({ error: "Not found" });
-      return buildEventResponse(db, data);
+      return toEventResponse(data);
     },
   );
 
   // POST /schedule-events (admin/manager only)
-  fastify.post("/", { onRequest: [guard] }, async (req: any, reply) => {
-    if (!["manager", "admin"].includes(req.user.role))
-      return reply.status(403).send({ error: "Forbidden" });
-
+  // item 3: insert do evento + vínculos com funcionários rodam dentro da RPC
+  // `create_schedule_event_with_employees` (transação Postgres única) — antes,
+  // se o insert dos vínculos falhasse, o evento ficava órfão (sem nenhum
+  // funcionário associado). Ver supabase/migrations/015_atomic_operations.sql.
+  fastify.post("/", { onRequest: [guard, adminOrManager] }, async (req, reply) => {
     const parsed = scheduleEventBody.safeParse(req.body);
     if (!parsed.success)
       return reply.status(400).send({ error: parsed.error.flatten() });
 
     const { employee_ids, ...eventFields } = parsed.data;
 
-    const { data: event, error: insertError } = await db
-      .from("schedule_events")
-      .insert(eventFields)
-      .select()
-      .single();
-
-    if (insertError)
-      return reply.status(500).send({ error: insertError.message });
-
-    const links = employee_ids.map((employee_id) => ({
-      schedule_event_id: event.id,
-      employee_id,
-    }));
-
-    const { error: linkError } = await db
-      .from("schedule_event_employees")
-      .insert(links);
-    if (linkError) return reply.status(500).send({ error: linkError.message });
-
-    const response = await buildEventResponse(db, event);
-
-    // Sincroniza com Google Calendar (fire-and-forget, não falha a requisição)
-    syncCreateToGoogleCalendar(db, event, response.employee_names, response.employee_ids).catch(
-      (err) => fastify.log.error(err, "google-calendar sync error"),
+    const { data: event, error: rpcError } = await db.rpc(
+      "create_schedule_event_with_employees",
+      { p_event: eventFields, p_employee_ids: employee_ids },
     );
+    if (rpcError) return reply.status(500).send({ error: rpcError.message });
 
-    return reply.status(201).send(response);
+    const { data: full, error: fetchError } = await db
+      .from("schedule_events")
+      .select(EVENT_SELECT)
+      .eq("id", (event as any).id)
+      .single();
+    if (fetchError || !full) return reply.status(500).send({ error: fetchError?.message ?? "Not found" });
+
+    const response = toEventResponse(full);
+
+    // Sincroniza com Google Calendar (fire-and-forget, não falha a requisição).
+    // item 4: o resultado (sucesso/falha) é gravado em calendar_sync_status, não
+    // só logado — o front pode mostrar ao usuário que a sincronização falhou.
+    syncCreateToGoogleCalendar(db, full, response.employee_names, response.employee_ids)
+      .then(() => markSyncStatus(db, full.id, "synced"))
+      .catch(async (err) => {
+        fastify.log.error(err, "google-calendar sync error");
+        await markSyncStatus(db, full.id, "failed");
+      });
+
+    return reply.status(201).send({ ...response, calendar_sync_status: "pending" });
   });
 
   // PATCH /schedule-events/:id/cancel (admin/manager only)
   fastify.patch<{ Params: { id: string } }>(
     '/:id/cancel',
-    { onRequest: [guard] },
-    async (req: any, reply) => {
-      if (!['manager', 'admin'].includes(req.user.role))
-        return reply.status(403).send({ error: 'Forbidden' })
-
+    { onRequest: [guard, adminOrManager] },
+    async (req, reply) => {
       const { data, error } = await db
         .from('schedule_events')
-        .update({ status: 'cancelled', updated_at: new Date().toISOString() })
+        .update({ status: 'cancelled', updated_at: new Date().toISOString(), calendar_sync_status: 'pending' })
         .eq('id', req.params.id)
-        .select()
+        .select(EVENT_SELECT)
         .single()
 
       if (error || !data) return reply.status(404).send({ error: 'Not found' })
 
-      syncCancelToGoogleCalendar(db, data).catch(
-        (err) => fastify.log.error(err, 'google-calendar cancel sync error'),
-      )
+      syncCancelToGoogleCalendar(db, data)
+        .then(() => markSyncStatus(db, data.id, 'synced'))
+        .catch(async (err) => {
+          fastify.log.error(err, 'google-calendar cancel sync error')
+          await markSyncStatus(db, data.id, 'failed')
+        })
 
-      return buildEventResponse(db, data)
+      return toEventResponse(data)
     },
   )
 
   // DELETE /schedule-events/:id (admin/manager only)
   fastify.delete<{ Params: { id: string } }>(
     "/:id",
-    { onRequest: [guard] },
-    async (req: any, reply) => {
-      if (!["manager", "admin"].includes(req.user.role))
-        return reply.status(403).send({ error: "Forbidden" });
-
+    { onRequest: [guard, adminOrManager] },
+    async (req, reply) => {
       // Busca event_ids antes de deletar
       const { data: eventData } = await db
         .from("schedule_events")
@@ -190,6 +187,8 @@ const scheduleEventsRoute: FastifyPluginAsync = async (fastify) => {
 
       if (error) return reply.status(500).send({ error: error.message });
 
+      // O registro já foi deletado — não há mais estado local para marcar
+      // como "falhou"; só resta logar para investigação manual.
       syncDeleteToGoogleCalendar(db, eventData, empLinks ?? []).catch(
         (err) => fastify.log.error(err, "google-calendar delete sync error"),
       );
@@ -198,6 +197,10 @@ const scheduleEventsRoute: FastifyPluginAsync = async (fastify) => {
     },
   );
 };
+
+async function markSyncStatus(db: any, eventId: string, status: "synced" | "failed") {
+  await db.from("schedule_events").update({ calendar_sync_status: status }).eq("id", eventId);
+}
 
 // ── Google Calendar sync helpers ────────────────────────────────────────────
 
