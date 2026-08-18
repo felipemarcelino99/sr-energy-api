@@ -38,6 +38,21 @@ const curateBody = z
     answer: d.answer,
   }));
 
+// MED-08: valida que a(s) máquina(s) existem antes de chamar Voyage/Groq — evita gastar
+// crédito de API externa com input inválido (machine_id forjado/inexistente).
+async function assertMachinesExist(
+  db: any,
+  machineIds: string[],
+): Promise<boolean> {
+  const { data, error } = await db
+    .from("machines")
+    .select("id")
+    .in("id", machineIds);
+  if (error || !data) return false;
+  const foundIds = new Set(data.map((m: any) => m.id));
+  return machineIds.every((id) => foundIds.has(id));
+}
+
 const chat: FastifyPluginAsync = async (fastify) => {
   const guard = (fastify as any).authenticate;
 
@@ -45,6 +60,8 @@ const chat: FastifyPluginAsync = async (fastify) => {
     const parsed = chatBody.safeParse(req.body);
     if (!parsed.success)
       return reply.status(400).send({ error: parsed.error.flatten() });
+    if (!(await assertMachinesExist(fastify.supabase, [parsed.data.machineId])))
+      return reply.status(404).send({ error: "Máquina não encontrada" });
     try {
       const answer = await answerQuestion(
         fastify.supabase,
@@ -67,6 +84,8 @@ const chat: FastifyPluginAsync = async (fastify) => {
     const parsed = compareBody.safeParse(req.body);
     if (!parsed.success)
       return reply.status(400).send({ error: parsed.error.flatten() });
+    if (!(await assertMachinesExist(fastify.supabase, parsed.data.machineIds)))
+      return reply.status(404).send({ error: "Uma ou mais máquinas não foram encontradas" });
     try {
       const answer = await compareAcrossMachines(
         fastify.supabase,

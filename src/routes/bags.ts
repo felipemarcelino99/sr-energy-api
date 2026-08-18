@@ -2,6 +2,7 @@ import type { FastifyPluginAsync } from 'fastify'
 import { z } from 'zod'
 import { uploadFile } from '@/services/storage.service'
 import { requireRoles } from '@/plugins/authorize'
+import { detectMimeFromBuffer } from '@/utils/file-signature'
 
 const bagBody = z.object({
   name: z.string().min(2).max(200),
@@ -23,19 +24,6 @@ const certParams = {
   },
   required: ['id', 'certId'],
 } as const
-
-const ALLOWED_SIGNATURES: Array<{ mime: string; bytes: number[] }> = [
-  { mime: 'application/pdf', bytes: [0x25, 0x50, 0x44, 0x46] },
-  { mime: 'image/jpeg',      bytes: [0xFF, 0xD8, 0xFF] },
-  { mime: 'image/png',       bytes: [0x89, 0x50, 0x4E, 0x47] },
-]
-
-function detectMimeFromBuffer(buf: Buffer): string | null {
-  for (const sig of ALLOWED_SIGNATURES) {
-    if (sig.bytes.every((b, i) => buf[i] === b)) return sig.mime
-  }
-  return null
-}
 
 const SELECT_BAG = 'id, name, model, quantity, created_at, updated_at, calibration_certificates(id, file_url, expiry_date)'
 
@@ -129,10 +117,11 @@ const bags: FastifyPluginAsync = async (fastify) => {
 
       const certId = crypto.randomUUID()
       const ext = fileMime === 'application/pdf' ? 'pdf' : fileMime === 'image/jpeg' ? 'jpg' : 'png'
+      const storagePath = `${req.params.id}/${certId}.${ext}`
       const url = await uploadFile(
         fastify.supabase,
         'bag-certificates',
-        `${req.params.id}/${certId}.${ext}`,
+        storagePath,
         fileBuffer,
         fileMime,
       )
@@ -143,7 +132,17 @@ const bags: FastifyPluginAsync = async (fastify) => {
         file_url: url,
         expiry_date: expiryDate,
       })
-      if (insertError) return reply.status(500).send({ error: insertError.message })
+      if (insertError) {
+        // item 3: o arquivo já subiu no storage antes do insert no banco (o storage
+        // não participa de transação Postgres). Se o insert falhar, o objeto ficaria
+        // órfão — compensação explícita: remove o arquivo recém-enviado.
+        try {
+          await fastify.supabase.storage.from('bag-certificates').remove([storagePath])
+        } catch (cleanupErr) {
+          fastify.log.error(cleanupErr, 'failed to remove orphaned certificate file after insert failure')
+        }
+        return reply.status(500).send({ error: insertError.message })
+      }
 
       const { data, error } = await db.from('bags').select(SELECT_BAG).eq('id', req.params.id).single()
       if (error || !data) return reply.status(404).send({ error: 'Not found' })

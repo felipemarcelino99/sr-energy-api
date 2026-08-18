@@ -1,6 +1,7 @@
 import type { FastifyPluginAsync } from 'fastify'
 import { z } from 'zod'
 import { insertNotification } from '@/services/notification.service'
+import { requireRoles } from '@/plugins/authorize'
 
 const jobBody = z.object({
   employee_id: z.string().min(1),
@@ -21,6 +22,37 @@ const jobBody = z.object({
   car_pickup_address: z.string().optional(),
   os_code: z.string().optional(),
 })
+
+// CRITICAL-01: employee não pode alterar campos administrativos (quem faz o job,
+// em qual máquina, quando está agendado) — só admin/manager, via jobBody completo.
+const employeeJobBody = jobBody.omit({ employee_id: true, machine_id: true, scheduled_date: true })
+
+// CRITICAL-01/07 (IDOR): busca o employee.id do usuário logado e confere se o job
+// pertence a ele. admin/manager sempre passam. Retorna null se acesso deve ser negado
+// (já responde 404 nesse caso — não vazamos 403 para não confirmar a existência do job
+// de outro colaborador).
+async function loadOwnedJob(db: any, req: any, reply: any): Promise<{ id: string; employee_id: string } | null> {
+  if (req.user.role === 'admin' || req.user.role === 'manager') {
+    const { data: job, error } = await db.from('jobs').select('id, employee_id').eq('id', req.params.id).single()
+    if (error || !job) {
+      reply.status(404).send({ error: 'Not found' })
+      return null
+    }
+    return job
+  }
+
+  const { data: emp } = await db.from('employees').select('id').eq('user_id', req.user.id).single()
+  if (!emp) {
+    reply.status(404).send({ error: 'Not found' })
+    return null
+  }
+  const { data: job, error } = await db.from('jobs').select('id, employee_id').eq('id', req.params.id).single()
+  if (error || !job || job.employee_id !== emp.id) {
+    reply.status(404).send({ error: 'Not found' })
+    return null
+  }
+  return job
+}
 
 const jobs: FastifyPluginAsync = async (fastify) => {
   const db = fastify.supabase
@@ -47,57 +79,39 @@ const jobs: FastifyPluginAsync = async (fastify) => {
     }))
   })
 
-  // GET /jobs/:id
-  fastify.get<{ Params: { id: string } }>('/:id', { onRequest: [guard] }, async (req, reply) => {
+  // GET /jobs/:id — CRITICAL-07 (IDOR): employee só vê job próprio; 404 (não 403) para não
+  // confirmar a existência do job de outro colaborador.
+  fastify.get<{ Params: { id: string } }>('/:id', { onRequest: [guard] }, async (req: any, reply) => {
     const { data, error } = await db.from('jobs')
       .select(`*, employees(name), machines(name, manual_url)`)
       .eq('id', req.params.id).single()
     if (error || !data) return reply.status(404).send({ error: 'Not found' })
+    if (req.user.role === 'employee') {
+      const { data: emp } = await db.from('employees').select('id').eq('user_id', req.user.id).single()
+      if (!emp || data.employee_id !== emp.id) return reply.status(404).send({ error: 'Not found' })
+    }
     return { ...data, employee_name: data.employees?.name, machine: data.machines }
   })
 
   // POST /jobs
-  fastify.post('/', { onRequest: [guard] }, async (req: any, reply) => {
-    if (!['manager', 'admin'].includes(req.user.role))
-      return reply.status(403).send({ error: 'Forbidden' })
+  // CRITICAL-02: insert do job, ajuste de estoque das ferramentas da máquina e
+  // criação do checklist pre_work rodam dentro da RPC `create_job_with_provisioning`
+  // (transação Postgres única). Se qualquer etapa falhar (ex.: checklist com FK
+  // inválida), o Postgres desfaz tudo — nunca fica job sem checklist, ou estoque
+  // debitado sem job. Ver supabase/migrations/015_atomic_operations.sql.
+  fastify.post('/', { onRequest: [guard, requireRoles('manager', 'admin')] }, async (req, reply) => {
     const parsed = jobBody.safeParse(req.body)
     if (!parsed.success) return reply.status(400).send({ error: parsed.error.flatten() })
 
-    const { data: job, error } = await db.from('jobs').insert(parsed.data).select().single()
+    const { data: result, error } = await db.rpc('create_job_with_provisioning', { p_job: parsed.data })
     if (error) return reply.status(500).send({ error: error.message })
 
-    // Gerar checklist e controlar estoque
-    const { data: machineTools } = await db
-      .from('machine_tools')
-      .select('*, tools(*)')
-      .eq('machine_id', parsed.data.machine_id)
+    const job = (result as any).job
+    const insufficientTools: string[] = (result as any).insufficient_tools ?? []
 
-    const insufficientTools: string[] = []
-
-    if (machineTools && machineTools.length > 0) {
-      for (const mt of machineTools) {
-        const tool = (mt as any).tools
-        if (tool && tool.quantity < mt.quantity_required) {
-          insufficientTools.push(tool.name)
-        }
-        // Reduz estoque (mínimo 0)
-        if (tool) {
-          const newQty = Math.max(0, tool.quantity - mt.quantity_required)
-          await db.from('tools').update({ quantity: newQty, updated_at: new Date().toISOString() }).eq('id', tool.id)
-        }
-      }
-
-      // Cria itens de checklist (pre_work)
-      const checklistItems = machineTools.map((mt: any) => ({
-        job_id: job.id,
-        employee_id: parsed.data.employee_id,
-        tool_id: mt.tool_id,
-        phase: 'pre_work',
-      }))
-      await db.from('job_checklists').insert(checklistItems)
-    }
-
-    // Notificar funcionário
+    // Notificar funcionário — best-effort, não deve derrubar a resposta 201 nem
+    // desfazer a criação do job caso a notificação falhe (já é logado dentro de
+    // insertNotification).
     const { data: emp } = await db.from('employees').select('user_id').eq('id', parsed.data.employee_id).single()
     if (emp?.user_id) {
       await insertNotification(db, emp.user_id,
@@ -108,18 +122,28 @@ const jobs: FastifyPluginAsync = async (fastify) => {
     return reply.status(201).send({ ...job, insufficient_tools: insufficientTools })
   })
 
-  // PUT /jobs/:id
-  fastify.put<{ Params: { id: string } }>('/:id', { onRequest: [guard] }, async (req, reply) => {
-    const parsed = jobBody.safeParse(req.body)
+  // PUT /jobs/:id — CRITICAL-01 (IDOR): employee só edita job próprio, e só campos não
+  // administrativos (employee_id, machine_id, scheduled_date ficam restritos a admin/manager).
+  fastify.put<{ Params: { id: string } }>('/:id', { onRequest: [guard] }, async (req: any, reply) => {
+    const isAdminOrManager = ['admin', 'manager'].includes(req.user.role)
+    const schema = isAdminOrManager ? jobBody : employeeJobBody
+    const parsed = schema.safeParse(req.body)
     if (!parsed.success) return reply.status(400).send({ error: parsed.error.flatten() })
+
+    const owned = await loadOwnedJob(db, req, reply)
+    if (!owned) return
+
     const { data, error } = await db.from('jobs').update({ ...parsed.data, updated_at: new Date().toISOString() })
       .eq('id', req.params.id).select().single()
     if (error || !data) return reply.status(404).send({ error: 'Not found' })
     return data
   })
 
-  // PATCH /jobs/:id/cancel
-  fastify.patch<{ Params: { id: string } }>('/:id/cancel', { onRequest: [guard] }, async (req, reply) => {
+  // PATCH /jobs/:id/cancel — CRITICAL-01 (IDOR): employee só cancela job próprio.
+  fastify.patch<{ Params: { id: string } }>('/:id/cancel', { onRequest: [guard] }, async (req: any, reply) => {
+    const owned = await loadOwnedJob(db, req, reply)
+    if (!owned) return
+
     const { data, error } = await db.from('jobs')
       .update({ status: 'cancelled', updated_at: new Date().toISOString() })
       .eq('id', req.params.id).select().single()
@@ -204,6 +228,16 @@ const jobs: FastifyPluginAsync = async (fastify) => {
   })
 }
 
+// CRITICAL-01/9: ajuste atômico de estoque via RPC `adjust_tool_stock` — um único
+// UPDATE (row-level lock do Postgres) em vez de ler quantity, calcular em memória e
+// escrever de volta. Elimina a corrupção de estoque sob concorrência (duas criações/
+// cancelamentos de job para a mesma ferramenta ao mesmo tempo). Usado tanto para
+// consumir estoque (delta negativo) quanto para restaurar (delta positivo).
+async function adjustToolStock(db: any, toolId: string, delta: number): Promise<void> {
+  const { error } = await db.rpc('adjust_tool_stock', { p_tool_id: toolId, p_delta: delta })
+  if (error) throw new Error(`Falha ao ajustar estoque da ferramenta ${toolId}: ${error.message}`)
+}
+
 async function restoreToolStock(db: any, jobId: string) {
   const { data: items } = await db
     .from('job_checklists')
@@ -218,7 +252,7 @@ async function restoreToolStock(db: any, jobId: string) {
 
   const { data: machineTools } = await db
     .from('machine_tools')
-    .select('tool_id, quantity_required, tools(id, quantity)')
+    .select('tool_id, quantity_required, tools(id)')
     .eq('machine_id', machineId)
 
   if (!machineTools) return
@@ -226,9 +260,7 @@ async function restoreToolStock(db: any, jobId: string) {
   for (const mt of machineTools) {
     const tool = (mt as any).tools
     if (tool) {
-      await db.from('tools')
-        .update({ quantity: tool.quantity + mt.quantity_required, updated_at: new Date().toISOString() })
-        .eq('id', tool.id)
+      await adjustToolStock(db, tool.id, mt.quantity_required)
     }
   }
 }

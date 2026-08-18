@@ -2,6 +2,7 @@ import type { FastifyPluginAsync } from 'fastify'
 import { z } from 'zod'
 import { uploadFile } from '@/services/storage.service'
 import { requireRoles } from '@/plugins/authorize'
+import { detectMimeFromBuffer } from '@/utils/file-signature'
 
 // HIGH-06: whitelist de campos
 const contractBody = z.object({
@@ -22,20 +23,6 @@ const uuidParams = {
   properties: { id: { type: 'string', format: 'uuid' } },
   required: ['id'],
 } as const
-
-// HIGH-07: verificação de magic bytes sem dependência externa
-const ALLOWED_SIGNATURES: Array<{ mime: string; bytes: number[] }> = [
-  { mime: 'application/pdf', bytes: [0x25, 0x50, 0x44, 0x46] }, // %PDF
-  { mime: 'image/jpeg',      bytes: [0xFF, 0xD8, 0xFF] },
-  { mime: 'image/png',       bytes: [0x89, 0x50, 0x4E, 0x47] },
-]
-
-function detectMimeFromBuffer(buf: Buffer): string | null {
-  for (const sig of ALLOWED_SIGNATURES) {
-    if (sig.bytes.every((b, i) => buf[i] === b)) return sig.mime
-  }
-  return null
-}
 
 const SELECT_CONTRACT = 'id, client_id, description, start_date, end_date, contract_type, contract_value, recurring, file_url, created_at, updated_at, clients(id, razao_social, cnpj)'
 
