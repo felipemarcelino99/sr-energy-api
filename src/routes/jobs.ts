@@ -21,17 +21,45 @@ const jobBody = z.object({
   car_return_time: z.string().optional(),
   car_pickup_address: z.string().optional(),
   os_code: z.string().optional(),
+  // Sub-plano 04 (fluxo PC-OS), item 4: campos estendidos de OS (ver
+  // supabase/migrations/017_jobs_pc_os_extension.sql). Todos opcionais porque
+  // uma OS nasce "esqueleto" ao aceitar uma PC (só número/contrato/status) e é
+  // completada depois pelo gestor.
+  scope_detail: z.string().optional(),
+  bag_id: z.string().optional(),
+  service_address: z.string().optional(),
+  client_contact_name: z.string().optional(),
+  client_contact_phone: z.string().optional(),
+  // Múltiplos colaboradores por OS (job_employees) — administrativo, só
+  // admin/manager atribuem quem trabalha na OS.
+  employee_ids: z.array(z.string().min(1)).optional(),
 })
 
 // CRITICAL-01: employee não pode alterar campos administrativos (quem faz o job,
 // em qual máquina, quando está agendado) — só admin/manager, via jobBody completo.
-const employeeJobBody = jobBody.omit({ employee_id: true, machine_id: true, scheduled_date: true })
+// Sub-plano 04: employee_ids também é administrativo (define quem está na OS).
+const employeeJobBody = jobBody.omit({ employee_id: true, machine_id: true, scheduled_date: true, employee_ids: true })
+
+// Sub-plano 04 (fluxo PC-OS), item 4: `employee_id` deixa de ser a única fonte de
+// vínculo colaborador↔OS (agora many-to-many via `job_employees`, ver
+// supabase/migrations/017_jobs_pc_os_extension.sql). `employee_id` continua existindo
+// como assignee legado usado pelo fluxo de provisionamento de ferramentas
+// (create_job_with_provisioning), então checamos as DUAS fontes: um funcionário tem
+// acesso ao job se aparece em `jobs.employee_id` (legado) OU em `job_employees`
+// (novo, múltiplos colaboradores). Isso preserva o achado de IDOR do sub-plano 01
+// (ninguém ganha acesso a job alheio) enquanto adiciona suporte a múltiplos
+// colaboradores por OS.
+export async function isJobAssignedToEmployee(db: any, jobId: string, employeeId: string, legacyEmployeeId?: string | null): Promise<boolean> {
+  if (legacyEmployeeId === employeeId) return true
+  const { data } = await db.from('job_employees').select('job_id').eq('job_id', jobId).eq('employee_id', employeeId).maybeSingle()
+  return !!data
+}
 
 // CRITICAL-01/07 (IDOR): busca o employee.id do usuário logado e confere se o job
-// pertence a ele. admin/manager sempre passam. Retorna null se acesso deve ser negado
-// (já responde 404 nesse caso — não vazamos 403 para não confirmar a existência do job
-// de outro colaborador).
-async function loadOwnedJob(db: any, req: any, reply: any): Promise<{ id: string; employee_id: string } | null> {
+// pertence a ele (via employee_id legado OU job_employees). admin/manager sempre
+// passam. Retorna null se acesso deve ser negado (já responde 404 nesse caso — não
+// vazamos 403 para não confirmar a existência do job de outro colaborador).
+async function loadOwnedJob(db: any, req: any, reply: any): Promise<{ id: string; employee_id: string | null } | null> {
   if (req.user.role === 'admin' || req.user.role === 'manager') {
     const { data: job, error } = await db.from('jobs').select('id, employee_id').eq('id', req.params.id).single()
     if (error || !job) {
@@ -47,7 +75,12 @@ async function loadOwnedJob(db: any, req: any, reply: any): Promise<{ id: string
     return null
   }
   const { data: job, error } = await db.from('jobs').select('id, employee_id').eq('id', req.params.id).single()
-  if (error || !job || job.employee_id !== emp.id) {
+  if (error || !job) {
+    reply.status(404).send({ error: 'Not found' })
+    return null
+  }
+  const owned = await isJobAssignedToEmployee(db, job.id, emp.id, job.employee_id)
+  if (!owned) {
     reply.status(404).send({ error: 'Not found' })
     return null
   }
@@ -66,7 +99,16 @@ const jobs: FastifyPluginAsync = async (fastify) => {
       // Busca employee_id pelo user_id do JWT
       const { data: emp } = await db.from('employees').select('id').eq('user_id', req.user.id).single()
       if (!emp) return []
-      query = (query as any).eq('employee_id', emp.id)
+      // Vínculo colaborador↔OS agora vem de duas fontes: employee_id legado (fluxo de
+      // provisionamento de ferramentas) e job_employees (múltiplos colaboradores,
+      // sub-plano 04). Um funcionário vê a união das duas.
+      const { data: linked } = await db.from('job_employees').select('job_id').eq('employee_id', emp.id)
+      const linkedIds: string[] = (linked ?? []).map((r: any) => r.job_id)
+      query = (query as any).or(
+        linkedIds.length > 0
+          ? `employee_id.eq.${emp.id},id.in.(${linkedIds.join(',')})`
+          : `employee_id.eq.${emp.id}`,
+      )
     }
     const { data, error } = await (query as any).order('scheduled_date', { ascending: false })
     if (error) return reply.status(500).send({ error: error.message })
@@ -79,18 +121,28 @@ const jobs: FastifyPluginAsync = async (fastify) => {
     }))
   })
 
-  // GET /jobs/:id — CRITICAL-07 (IDOR): employee só vê job próprio; 404 (não 403) para não
-  // confirmar a existência do job de outro colaborador.
+  // GET /jobs/:id — CRITICAL-07 (IDOR): employee só vê job próprio (employee_id legado
+  // OU job_employees); 404 (não 403) para não confirmar a existência do job de outro
+  // colaborador.
   fastify.get<{ Params: { id: string } }>('/:id', { onRequest: [guard] }, async (req: any, reply) => {
     const { data, error } = await db.from('jobs')
-      .select(`*, employees(name), machines(name, manual_url)`)
+      .select(`*, employees(name), machines(name, manual_url), job_employees(employee_id)`)
       .eq('id', req.params.id).single()
     if (error || !data) return reply.status(404).send({ error: 'Not found' })
     if (req.user.role === 'employee') {
       const { data: emp } = await db.from('employees').select('id').eq('user_id', req.user.id).single()
-      if (!emp || data.employee_id !== emp.id) return reply.status(404).send({ error: 'Not found' })
+      if (!emp) return reply.status(404).send({ error: 'Not found' })
+      const owned = await isJobAssignedToEmployee(db, data.id, emp.id, data.employee_id)
+      if (!owned) return reply.status(404).send({ error: 'Not found' })
     }
-    return { ...data, employee_name: data.employees?.name, machine: data.machines }
+    const employeeIds = ((data as any).job_employees ?? []).map((r: any) => r.employee_id)
+    return {
+      ...data,
+      employee_name: data.employees?.name,
+      machine: data.machines,
+      employee_ids: employeeIds,
+      job_employees: undefined,
+    }
   })
 
   // POST /jobs
@@ -133,9 +185,24 @@ const jobs: FastifyPluginAsync = async (fastify) => {
     const owned = await loadOwnedJob(db, req, reply)
     if (!owned) return
 
-    const { data, error } = await db.from('jobs').update({ ...parsed.data, updated_at: new Date().toISOString() })
+    const { employee_ids, ...jobFields } = parsed.data as typeof parsed.data & { employee_ids?: string[] }
+
+    const { data, error } = await db.from('jobs').update({ ...jobFields, updated_at: new Date().toISOString() })
       .eq('id', req.params.id).select().single()
     if (error || !data) return reply.status(404).send({ error: 'Not found' })
+
+    // Sub-plano 04, item 4/12: substitui os colaboradores atribuídos à OS
+    // quando o gestor envia employee_ids. Só é enviado por admin/manager
+    // (employeeJobBody, usado pelo employee, omite o campo inteiro).
+    if (employee_ids) {
+      await db.from('job_employees').delete().eq('job_id', req.params.id)
+      if (employee_ids.length > 0) {
+        const { error: linkError } = await db.from('job_employees')
+          .insert(employee_ids.map((employeeId) => ({ job_id: req.params.id, employee_id: employeeId })))
+        if (linkError) return reply.status(500).send({ error: linkError.message })
+      }
+    }
+
     return data
   })
 

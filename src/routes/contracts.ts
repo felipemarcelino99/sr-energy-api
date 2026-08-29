@@ -3,6 +3,7 @@ import { z } from 'zod'
 import { uploadFile } from '@/services/storage.service'
 import { requireRoles } from '@/plugins/authorize'
 import { detectMimeFromBuffer } from '@/utils/file-signature'
+import { record as recordAuditEvent } from '@/services/audit-log.service'
 
 // HIGH-06: whitelist de campos
 const contractBody = z.object({
@@ -24,7 +25,23 @@ const uuidParams = {
   required: ['id'],
 } as const
 
-const SELECT_CONTRACT = 'id, client_id, description, start_date, end_date, contract_type, contract_value, recurring, file_url, created_at, updated_at, clients(id, razao_social, cnpj)'
+const SELECT_CONTRACT = 'id, client_id, number, status, description, start_date, end_date, contract_type, contract_value, recurring, file_url, created_at, updated_at, clients(id, razao_social, cnpj)'
+
+// Sub-plano 04, item 5: transição de status de contrato/OS grava no audit-log
+// (append-only, ver supabase/migrations/019_audit_log.sql). Best-effort — nunca
+// derruba a resposta HTTP da transição por falha de log (ver audit-log.service).
+async function recordContractAuditEvent(
+  db: Parameters<typeof recordAuditEvent>[0],
+  event: { action: 'contract.accepted' | 'contract.rejected'; contractId: string; actorId: string; metadata?: Record<string, unknown> },
+): Promise<void> {
+  await recordAuditEvent(db, {
+    entityType: 'contract',
+    entityId: event.contractId,
+    actorId: event.actorId,
+    action: event.action,
+    metadata: event.metadata,
+  })
+}
 
 const contracts: FastifyPluginAsync = async (fastify) => {
   const db = fastify.supabase
@@ -116,6 +133,52 @@ const contracts: FastifyPluginAsync = async (fastify) => {
       const url = await uploadFile(fastify.supabase, 'contract-files', `${req.params.id}.pdf`, buffer, detectedMime)
       await db.from('contracts').update({ file_url: url, updated_at: new Date().toISOString() }).eq('id', req.params.id)
       return { url }
+    },
+  )
+
+  // PATCH /contracts/:id/accept — transição pending -> accepted; dispara criação
+  // automática da OS (jobs) com o mesmo número, via RPC transacional
+  // `accept_contract` (ver supabase/migrations/018_contracts_accept_reject.sql).
+  // Só admin/manager podem decidir uma proposta comercial.
+  fastify.patch<{ Params: { id: string } }>(
+    '/:id/accept',
+    { onRequest: [guard, adminOrManager], schema: { params: uuidParams } },
+    async (req, reply) => {
+      const { data, error } = await db.rpc('accept_contract', { p_contract_id: req.params.id })
+      if (error) {
+        if (error.message?.includes('not found')) return reply.status(404).send({ error: 'Not found' })
+        if (error.message?.includes('is not pending')) return reply.status(409).send({ error: 'Contrato não está pendente' })
+        return reply.status(500).send({ error: error.message })
+      }
+      const result = data as { contract: Record<string, unknown>; job: Record<string, unknown> }
+      await recordContractAuditEvent(db, {
+        action: 'contract.accepted',
+        contractId: req.params.id,
+        actorId: (req as any).user.id,
+        metadata: { jobId: result.job?.id, number: result.contract?.number },
+      })
+      return reply.status(200).send(result)
+    },
+  )
+
+  // PATCH /contracts/:id/reject — transição pending -> rejected (mantém histórico
+  // completo de PCs recusadas, sem gerar OS).
+  fastify.patch<{ Params: { id: string } }>(
+    '/:id/reject',
+    { onRequest: [guard, adminOrManager], schema: { params: uuidParams } },
+    async (req, reply) => {
+      const { data, error } = await db.rpc('reject_contract', { p_contract_id: req.params.id })
+      if (error) {
+        if (error.message?.includes('not found')) return reply.status(404).send({ error: 'Not found' })
+        if (error.message?.includes('is not pending')) return reply.status(409).send({ error: 'Contrato não está pendente' })
+        return reply.status(500).send({ error: error.message })
+      }
+      await recordContractAuditEvent(db, {
+        action: 'contract.rejected',
+        contractId: req.params.id,
+        actorId: (req as any).user.id,
+      })
+      return reply.status(200).send(data)
     },
   )
 }

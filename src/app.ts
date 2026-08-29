@@ -19,6 +19,8 @@ import googleAuthRoute from '@/routes/google-auth'
 import toolsRoute from '@/routes/tools'
 import bagsRoute from '@/routes/bags'
 import clientsRoute from '@/routes/clients'
+import documentsRoute from '@/routes/documents'
+import auditLogRoute from '@/routes/audit-log'
 
 export function buildApp() {
   // HIGH-03: FRONTEND_URL obrigatória em produção
@@ -72,6 +74,8 @@ export function buildApp() {
   app.register(toolsRoute, { prefix: '/tools' })
   app.register(bagsRoute, { prefix: '/bags' })
   app.register(clientsRoute, { prefix: '/clients' })
+  app.register(documentsRoute, { prefix: '/documents' })
+  app.register(auditLogRoute, { prefix: '/audit-log' })
 
   app.get('/health', async () => ({ status: 'ok' }))
 

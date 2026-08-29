@@ -51,10 +51,17 @@ describe('GET /jobs — employee vê apenas os próprios', () => {
           }),
         }),
       }
+      // job_employees: nenhum vínculo adicional (sub-plano 04) — a lista some ao
+      // employee_id legado via .or()
+      if (table === 'job_employees') return {
+        select: jest.fn().mockReturnValue({
+          eq: jest.fn().mockResolvedValue({ data: [], error: null }),
+        }),
+      }
       // jobs table
       return {
         select: jest.fn().mockReturnValue({
-          eq: jest.fn().mockReturnValue({
+          or: jest.fn().mockReturnValue({
             order: jest.fn().mockResolvedValue({ data: rows, error: null }),
           }),
         }),
@@ -191,6 +198,14 @@ describe('PATCH /jobs/:id/cancel', () => {
       if (table === 'jobs') return {
         select: jest.fn().mockReturnValue({
           eq: jest.fn().mockReturnValue({ single: jest.fn().mockResolvedValue({ data: foreignJob, error: null }) }),
+        }),
+      }
+      // job_employees: sem vínculo — sub-plano 04, isJobAssignedToEmployee
+      if (table === 'job_employees') return {
+        select: jest.fn().mockReturnValue({
+          eq: jest.fn().mockReturnValue({
+            eq: jest.fn().mockReturnValue({ maybeSingle: jest.fn().mockResolvedValue({ data: null, error: null }) }),
+          }),
         }),
       }
       return mockSupabase
@@ -369,6 +384,13 @@ describe('PUT /jobs/:id — CRITICAL-01 (IDOR)', () => {
           eq: jest.fn().mockReturnValue({ single: jest.fn().mockResolvedValue({ data: foreignJob, error: null }) }),
         }),
       }
+      if (table === 'job_employees') return {
+        select: jest.fn().mockReturnValue({
+          eq: jest.fn().mockReturnValue({
+            eq: jest.fn().mockReturnValue({ maybeSingle: jest.fn().mockResolvedValue({ data: null, error: null }) }),
+          }),
+        }),
+      }
       return mockSupabase
     })
 
@@ -435,6 +457,13 @@ describe('GET /jobs/:id — CRITICAL-07 (IDOR)', () => {
           eq: jest.fn().mockReturnValue({ single: jest.fn().mockResolvedValue({ data: { id: 'emp-db-1' }, error: null }) }),
         }),
       }
+      if (table === 'job_employees') return {
+        select: jest.fn().mockReturnValue({
+          eq: jest.fn().mockReturnValue({
+            eq: jest.fn().mockReturnValue({ maybeSingle: jest.fn().mockResolvedValue({ data: null, error: null }) }),
+          }),
+        }),
+      }
       return mockSupabase
     })
 
@@ -464,6 +493,158 @@ describe('GET /jobs/:id — CRITICAL-07 (IDOR)', () => {
 
     const res = await app.inject({ method: 'GET', url: '/jobs/j-1', headers: { 'x-test-user': emp } })
     expect(res.statusCode).toBe(200)
+  })
+})
+
+describe('loadOwnedJob — ramos de 404 pré-existentes (cobertura)', () => {
+  it('manager recebe 404 ao cancelar job inexistente', async () => {
+    const app = buildApp()
+    app.register(jobsRoute, { prefix: '/jobs' })
+    await app.ready()
+    mockSupabase.from.mockImplementation((table: string) => {
+      if (table === 'jobs') return {
+        select: jest.fn().mockReturnValue({ eq: jest.fn().mockReturnValue({ single: jest.fn().mockResolvedValue({ data: null, error: { message: 'not found' } }) }) }),
+      }
+      return mockSupabase
+    })
+    const res = await app.inject({ method: 'PATCH', url: '/jobs/j-none/cancel', headers: { 'x-test-user': mgr } })
+    expect(res.statusCode).toBe(404)
+  })
+
+  it('employee recebe 404 ao editar job quando não existe registro de employee vinculado ao user', async () => {
+    const app = buildApp()
+    app.register(jobsRoute, { prefix: '/jobs' })
+    await app.ready()
+    mockSupabase.from.mockImplementation((table: string) => {
+      if (table === 'employees') return {
+        select: jest.fn().mockReturnValue({ eq: jest.fn().mockReturnValue({ single: jest.fn().mockResolvedValue({ data: null, error: null }) }) }),
+      }
+      return mockSupabase
+    })
+    const res = await app.inject({
+      method: 'PUT', url: '/jobs/j-1', headers: { 'x-test-user': emp },
+      payload: { job_type: 'maintenance', description: 'x', city: 'Curitiba', state: 'PR', accommodation: false, car: true, start_time: '08:00', end_time: '17:00' },
+    })
+    expect(res.statusCode).toBe(404)
+  })
+
+  it('employee recebe 404 ao cancelar job inexistente (jobs select falha)', async () => {
+    const app = buildApp()
+    app.register(jobsRoute, { prefix: '/jobs' })
+    await app.ready()
+    mockSupabase.from.mockImplementation((table: string) => {
+      if (table === 'employees') return {
+        select: jest.fn().mockReturnValue({ eq: jest.fn().mockReturnValue({ single: jest.fn().mockResolvedValue({ data: { id: 'emp-db-1' }, error: null }) }) }),
+      }
+      if (table === 'jobs') return {
+        select: jest.fn().mockReturnValue({ eq: jest.fn().mockReturnValue({ single: jest.fn().mockResolvedValue({ data: null, error: { message: 'not found' } }) }) }),
+      }
+      return mockSupabase
+    })
+    const res = await app.inject({ method: 'PATCH', url: '/jobs/j-none/cancel', headers: { 'x-test-user': emp } })
+    expect(res.statusCode).toBe(404)
+  })
+})
+
+describe('job_employees — sub-plano 04 (múltiplos colaboradores por OS)', () => {
+  it('employee sem employee_id legado, mas vinculado via job_employees, acessa o job (GET /:id)', async () => {
+    const app = buildApp()
+    app.register(jobsRoute, { prefix: '/jobs' })
+    await app.ready()
+    // OS "esqueleto" criada via accept_contract não tem employee_id legado (nasce
+    // com colunas operacionais nulas, ver 017_jobs_pc_os_extension.sql) — o vínculo
+    // vem só de job_employees.
+    const job = { id: 'j-os-1', employee_id: null, employees: null, machines: null }
+
+    mockSupabase.from.mockImplementation((table: string) => {
+      if (table === 'jobs') return {
+        select: jest.fn().mockReturnValue({
+          eq: jest.fn().mockReturnValue({ single: jest.fn().mockResolvedValue({ data: job, error: null }) }),
+        }),
+      }
+      if (table === 'employees') return {
+        select: jest.fn().mockReturnValue({
+          eq: jest.fn().mockReturnValue({ single: jest.fn().mockResolvedValue({ data: { id: 'emp-db-1' }, error: null }) }),
+        }),
+      }
+      if (table === 'job_employees') return {
+        select: jest.fn().mockReturnValue({
+          eq: jest.fn().mockReturnValue({
+            eq: jest.fn().mockReturnValue({ maybeSingle: jest.fn().mockResolvedValue({ data: { job_id: 'j-os-1' }, error: null }) }),
+          }),
+        }),
+      }
+      return mockSupabase
+    })
+
+    const res = await app.inject({ method: 'GET', url: '/jobs/j-os-1', headers: { 'x-test-user': emp } })
+    expect(res.statusCode).toBe(200)
+  })
+
+  it('CRITICAL (IDOR, não regredir sub-plano 01): employee vinculado a OUTRA OS via job_employees não acessa este job', async () => {
+    const app = buildApp()
+    app.register(jobsRoute, { prefix: '/jobs' })
+    await app.ready()
+    const job = { id: 'j-os-2', employee_id: null }
+
+    mockSupabase.from.mockImplementation((table: string) => {
+      if (table === 'jobs') return {
+        select: jest.fn().mockReturnValue({
+          eq: jest.fn().mockReturnValue({ single: jest.fn().mockResolvedValue({ data: job, error: null }) }),
+        }),
+      }
+      if (table === 'employees') return {
+        select: jest.fn().mockReturnValue({
+          eq: jest.fn().mockReturnValue({ single: jest.fn().mockResolvedValue({ data: { id: 'emp-db-1' }, error: null }) }),
+        }),
+      }
+      // Não vinculado a j-os-2 — só a outros jobs.
+      if (table === 'job_employees') return {
+        select: jest.fn().mockReturnValue({
+          eq: jest.fn().mockReturnValue({
+            eq: jest.fn().mockReturnValue({ maybeSingle: jest.fn().mockResolvedValue({ data: null, error: null }) }),
+          }),
+        }),
+      }
+      return mockSupabase
+    })
+
+    const res = await app.inject({ method: 'GET', url: '/jobs/j-os-2', headers: { 'x-test-user': emp } })
+    expect(res.statusCode).toBe(404)
+  })
+
+  it('GET /jobs inclui jobs vinculados só via job_employees (sem employee_id legado)', async () => {
+    const app = buildApp()
+    app.register(jobsRoute, { prefix: '/jobs' })
+    await app.ready()
+    const rows = [{ id: 'j-os-1', employee_id: null }]
+
+    let orFilter = ''
+    mockSupabase.from.mockImplementation((table: string) => {
+      if (table === 'employees') return {
+        select: jest.fn().mockReturnValue({
+          eq: jest.fn().mockReturnValue({ single: jest.fn().mockResolvedValue({ data: { id: 'emp-db-1' }, error: null }) }),
+        }),
+      }
+      if (table === 'job_employees') return {
+        select: jest.fn().mockReturnValue({
+          eq: jest.fn().mockResolvedValue({ data: [{ job_id: 'j-os-1' }], error: null }),
+        }),
+      }
+      return {
+        select: jest.fn().mockReturnValue({
+          or: jest.fn().mockImplementation((filter: string) => {
+            orFilter = filter
+            return { order: jest.fn().mockResolvedValue({ data: rows, error: null }) }
+          }),
+        }),
+      }
+    })
+
+    const res = await app.inject({ method: 'GET', url: '/jobs', headers: { 'x-test-user': emp } })
+    expect(res.statusCode).toBe(200)
+    expect(orFilter).toContain('id.in.(j-os-1)')
+    expect(orFilter).toContain('employee_id.eq.emp-db-1')
   })
 })
 
@@ -594,5 +775,99 @@ describe('POST /jobs/:id/checklist/duplicate', () => {
     const res = await app.inject({ method: 'POST', url: '/jobs/j-1/checklist/duplicate', headers: { 'x-test-user': mgr } })
     expect(res.statusCode).toBe(200)
     expect(res.json()).toHaveLength(1)
+  })
+})
+
+describe('PUT /jobs/:id — sub-plano 04, item 4/12 (employee_ids / job_employees)', () => {
+  const managerEditPayload = {
+    employee_id: 'emp-db-1',
+    machine_id: 'm-1',
+    job_type: 'maintenance',
+    description: 'Revisão geral',
+    scheduled_date: '2026-05-01',
+    city: 'Curitiba',
+    state: 'PR',
+    accommodation: false,
+    car: true,
+    start_time: '08:00',
+    end_time: '17:00',
+    employee_ids: ['emp-db-1', 'emp-db-2'],
+  }
+
+  it('manager substitui os colaboradores atribuídos à OS via employee_ids', async () => {
+    const app = buildApp()
+    app.register(jobsRoute, { prefix: '/jobs' })
+    await app.ready()
+    const deleteEq = jest.fn().mockResolvedValue({ error: null })
+    const insertLinks = jest.fn().mockResolvedValue({ error: null })
+
+    mockSupabase.from.mockImplementation((table: string) => {
+      if (table === 'jobs') return {
+        select: jest.fn().mockReturnValue({
+          eq: jest.fn().mockReturnValue({ single: jest.fn().mockResolvedValue({ data: { id: 'j-1', employee_id: 'emp-db-1' }, error: null }) }),
+        }),
+        update: jest.fn().mockReturnValue({
+          eq: jest.fn().mockReturnValue({
+            select: jest.fn().mockReturnValue({ single: jest.fn().mockResolvedValue({ data: { id: 'j-1' }, error: null }) }),
+          }),
+        }),
+      }
+      if (table === 'job_employees') return {
+        delete: jest.fn().mockReturnValue({ eq: deleteEq }),
+        insert: insertLinks,
+      }
+      return mockSupabase
+    })
+
+    const res = await app.inject({
+      method: 'PUT', url: '/jobs/j-1', headers: { 'x-test-user': mgr }, payload: managerEditPayload,
+    })
+    expect(res.statusCode).toBe(200)
+    expect(deleteEq).toHaveBeenCalledWith('job_id', 'j-1')
+    expect(insertLinks).toHaveBeenCalledWith([
+      { job_id: 'j-1', employee_id: 'emp-db-1' },
+      { job_id: 'j-1', employee_id: 'emp-db-2' },
+    ])
+  })
+
+  it('employee_ids enviado por employee é ignorado (campo administrativo)', async () => {
+    const app = buildApp()
+    app.register(jobsRoute, { prefix: '/jobs' })
+    await app.ready()
+    const linkTouched = jest.fn()
+
+    mockSupabase.from.mockImplementation((table: string) => {
+      if (table === 'employees') return {
+        select: jest.fn().mockReturnValue({
+          eq: jest.fn().mockReturnValue({ single: jest.fn().mockResolvedValue({ data: { id: 'emp-db-1' }, error: null }) }),
+        }),
+      }
+      if (table === 'jobs') return {
+        select: jest.fn().mockReturnValue({
+          eq: jest.fn().mockReturnValue({ single: jest.fn().mockResolvedValue({ data: { id: 'j-1', employee_id: 'emp-db-1' }, error: null }) }),
+        }),
+        update: jest.fn().mockReturnValue({
+          eq: jest.fn().mockReturnValue({
+            select: jest.fn().mockReturnValue({ single: jest.fn().mockResolvedValue({ data: { id: 'j-1' }, error: null }) }),
+          }),
+        }),
+      }
+      if (table === 'job_employees') {
+        linkTouched()
+        return { delete: jest.fn().mockReturnThis(), eq: jest.fn().mockResolvedValue({ error: null }) }
+      }
+      return mockSupabase
+    })
+
+    const res = await app.inject({
+      method: 'PUT', url: '/jobs/j-1', headers: { 'x-test-user': emp },
+      payload: {
+        job_type: 'maintenance', description: 'Revisão geral', city: 'Curitiba', state: 'PR',
+        accommodation: false, car: true, start_time: '08:00', end_time: '17:00',
+        employee_ids: ['emp-db-9'],
+      },
+    })
+    expect(res.statusCode).toBe(200)
+    expect(linkTouched).not.toHaveBeenCalled()
   })
 })
