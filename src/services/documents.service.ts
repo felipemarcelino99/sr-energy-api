@@ -14,6 +14,7 @@ export interface DocumentRow {
   drive_url: string | null
   note: string | null
   label: string | null
+  document_type: 'RD' | 'RDO' | 'RT' | 'other'
   created_by: string
   created_at: string
 }
@@ -23,7 +24,7 @@ export interface DocumentRow {
 // signed URL (reaproveita a correção do achado CRITICAL/HIGH-06 de storage.service).
 export async function attachDocument(
   db: SupabaseClient,
-  params: { entityType: DocumentEntityType; entityId: string; bucket: string; path: string; actorId: string; label?: string },
+  params: { entityType: DocumentEntityType; entityId: string; bucket: string; path: string; actorId: string; label?: string; documentType?: 'RD' | 'RDO' | 'RT' | 'other' },
 ): Promise<DocumentRow> {
   const { data, error } = await db.from('documents').insert({
     entity_type: params.entityType,
@@ -32,6 +33,7 @@ export async function attachDocument(
     bucket: params.bucket,
     path: params.path,
     label: params.label ?? null,
+    document_type: params.documentType ?? 'other',
     created_by: params.actorId,
   }).select().single()
   if (error) throw new Error(`documents: failed to attach: ${error.message}`)
@@ -50,7 +52,7 @@ export async function attachDocument(
 // arquivo, só a URL. `note` é obrigatório (motivo/contexto do vínculo).
 export async function linkLegacyDocument(
   db: SupabaseClient,
-  params: { entityType: DocumentEntityType; entityId: string; driveUrl: string; note: string; actorId: string; label?: string },
+  params: { entityType: DocumentEntityType; entityId: string; driveUrl: string; note: string; actorId: string; label?: string; documentType?: 'RD' | 'RDO' | 'RT' | 'other' },
 ): Promise<DocumentRow> {
   const { data, error } = await db.from('documents').insert({
     entity_type: params.entityType,
@@ -59,6 +61,7 @@ export async function linkLegacyDocument(
     drive_url: params.driveUrl,
     note: params.note,
     label: params.label ?? null,
+    document_type: params.documentType ?? 'other',
     created_by: params.actorId,
   }).select().single()
   if (error) throw new Error(`documents: failed to link legacy document: ${error.message}`)

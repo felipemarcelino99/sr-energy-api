@@ -8,8 +8,9 @@ coverage/
 .env.*.local
 .env.production
 
-# Supabase
-*supabase
+# Supabase CLI local/cache state (config.toml e migrations SÃO versionados)
+supabase/.temp
+supabase/.branches
 
 # MCP Configs
 .mcp.json

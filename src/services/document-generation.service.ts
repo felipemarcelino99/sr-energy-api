@@ -88,6 +88,7 @@ export async function generateReportPdf(
       bucket: 'documents',
       path,
       label: `Relatório técnico OS ${reportData.jobNumber}`,
+      documentType: 'RT',
       actorId,
     })
     return doc.id

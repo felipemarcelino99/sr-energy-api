@@ -47,6 +47,28 @@ describe('documents.service', () => {
         entityType: 'job', entityId: 'j-1', bucket: 'documents', path: 'x', actorId: 'u-1',
       })).rejects.toThrow('db down')
     })
+
+    it('default document_type é "other" quando não informado', async () => {
+      const row = { id: 'doc-1', entity_type: 'job', entity_id: 'j-1', storage_kind: 'internal' }
+      const db = buildDb({ single: jest.fn().mockResolvedValue({ data: row, error: null }) })
+
+      await attachDocument(db as any, {
+        entityType: 'job', entityId: 'j-1', bucket: 'documents', path: 'job/j-1/x.pdf', actorId: 'u-1',
+      })
+
+      expect(db.insert).toHaveBeenCalledWith(expect.objectContaining({ document_type: 'other' }))
+    })
+
+    it('repassa document_type informado explicitamente pro insert', async () => {
+      const row = { id: 'doc-1', entity_type: 'job', entity_id: 'j-1', storage_kind: 'internal' }
+      const db = buildDb({ single: jest.fn().mockResolvedValue({ data: row, error: null }) })
+
+      await attachDocument(db as any, {
+        entityType: 'job', entityId: 'j-1', bucket: 'documents', path: 'job/j-1/x.pdf', actorId: 'u-1', documentType: 'RD',
+      })
+
+      expect(db.insert).toHaveBeenCalledWith(expect.objectContaining({ document_type: 'RD' }))
+    })
   })
 
   describe('linkLegacyDocument', () => {
@@ -64,6 +86,23 @@ describe('documents.service', () => {
       }))
       expect(recordAuditEvent).toHaveBeenCalledWith(db, expect.objectContaining({ action: 'document.linked' }))
       expect(result).toEqual(row)
+    })
+
+    it('repassa document_type informado explicitamente pro insert, default "other" quando ausente', async () => {
+      const row = { id: 'doc-2', entity_type: 'contract', entity_id: 'c-1', storage_kind: 'drive_link' }
+      const db = buildDb({ single: jest.fn().mockResolvedValue({ data: row, error: null }) })
+
+      await linkLegacyDocument(db as any, {
+        entityType: 'contract', entityId: 'c-1', driveUrl: 'https://drive.google.com/x', note: 'acervo 2023', actorId: 'u-2', documentType: 'RDO',
+      })
+      expect(db.insert).toHaveBeenCalledWith(expect.objectContaining({ document_type: 'RDO' }))
+
+      jest.clearAllMocks()
+      const db2 = buildDb({ single: jest.fn().mockResolvedValue({ data: row, error: null }) })
+      await linkLegacyDocument(db2 as any, {
+        entityType: 'contract', entityId: 'c-1', driveUrl: 'https://drive.google.com/x', note: 'acervo 2023', actorId: 'u-2',
+      })
+      expect(db2.insert).toHaveBeenCalledWith(expect.objectContaining({ document_type: 'other' }))
     })
   })
 

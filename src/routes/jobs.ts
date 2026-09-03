@@ -9,6 +9,11 @@ const jobBody = z.object({
   job_type: z.enum(['maintenance', 'implementation']),
   description: z.string().min(1),
   scheduled_date: z.string().min(1),
+  // Sub-plano: migration 023_job_date_range.sql. Data de fim opcional — ausente
+  // significa serviço de um dia só (comportamento atual, sem mudança). O CHECK
+  // constraint do banco garante scheduled_end_date >= scheduled_date quando ambos
+  // preenchidos; não duplicamos essa validação aqui no Zod.
+  scheduled_end_date: z.string().optional(),
   city: z.string().min(1),
   state: z.string().length(2),
   accommodation: z.boolean(),
@@ -38,7 +43,13 @@ const jobBody = z.object({
 // CRITICAL-01: employee não pode alterar campos administrativos (quem faz o job,
 // em qual máquina, quando está agendado) — só admin/manager, via jobBody completo.
 // Sub-plano 04: employee_ids também é administrativo (define quem está na OS).
-const employeeJobBody = jobBody.omit({ employee_id: true, machine_id: true, scheduled_date: true, employee_ids: true })
+const employeeJobBody = jobBody.omit({
+  employee_id: true,
+  machine_id: true,
+  scheduled_date: true,
+  scheduled_end_date: true,
+  employee_ids: true,
+})
 
 // Sub-plano 04 (fluxo PC-OS), item 4: `employee_id` deixa de ser a única fonte de
 // vínculo colaborador↔OS (agora many-to-many via `job_employees`, ver
@@ -93,8 +104,13 @@ const jobs: FastifyPluginAsync = async (fastify) => {
 
   // GET /jobs
   fastify.get('/', { onRequest: [guard] }, async (req: any, reply) => {
+    // `contracts(number, clients(razao_social))`: embed usado só para resolver
+    // client_name na listagem (número da PC/contrato já vem em `jobs.number`,
+    // não precisa duplicar). `jobs.contract_id` tem uma única FK possível para
+    // `contracts`, e `contracts.client_id` uma única FK para `clients` — sem
+    // ambiguidade, não precisa do sufixo `!fkey` usado em employees.
     let query = db.from('jobs')
-      .select(`*, employees(name), machines(name)`)
+      .select(`*, employees!jobs_employee_id_fkey(name), machines(name), contracts(number, clients(razao_social))`)
     if (req.user.role === 'employee') {
       // Busca employee_id pelo user_id do JWT
       const { data: emp } = await db.from('employees').select('id').eq('user_id', req.user.id).single()
@@ -116,8 +132,10 @@ const jobs: FastifyPluginAsync = async (fastify) => {
       ...j,
       employee_name: j.employees?.name,
       machine_name: j.machines?.name,
+      client_name: j.contracts?.clients?.razao_social ?? null,
       employees: undefined,
       machines: undefined,
+      contracts: undefined,
     }))
   })
 
@@ -126,7 +144,9 @@ const jobs: FastifyPluginAsync = async (fastify) => {
   // colaborador.
   fastify.get<{ Params: { id: string } }>('/:id', { onRequest: [guard] }, async (req: any, reply) => {
     const { data, error } = await db.from('jobs')
-      .select(`*, employees(name), machines(name, manual_url), job_employees(employee_id)`)
+      .select(
+        `*, employees!jobs_employee_id_fkey(name), machines(name, manual_url), job_employees(employee_id)`,
+      )
       .eq('id', req.params.id).single()
     if (error || !data) return reply.status(404).send({ error: 'Not found' })
     if (req.user.role === 'employee') {
@@ -136,12 +156,22 @@ const jobs: FastifyPluginAsync = async (fastify) => {
       if (!owned) return reply.status(404).send({ error: 'Not found' })
     }
     const employeeIds = ((data as any).job_employees ?? []).map((r: any) => r.employee_id)
+
+    // Vínculo reverso: no máximo uma proposal (PC) aponta para esta OS
+    // (jobs.id é o alvo de proposals.job_id, único por natureza do fluxo
+    // accept_proposal). OS antigas/sem PC de origem simplesmente não têm
+    // proposal correspondente.
+    const { data: proposal } = await db.from('proposals')
+      .select('id, number')
+      .eq('job_id', req.params.id).maybeSingle()
+
     return {
       ...data,
       employee_name: data.employees?.name,
       machine: data.machines,
       employee_ids: employeeIds,
       job_employees: undefined,
+      proposal: proposal ?? null,
     }
   })
 
@@ -186,6 +216,12 @@ const jobs: FastifyPluginAsync = async (fastify) => {
     if (!owned) return
 
     const { employee_ids, ...jobFields } = parsed.data as typeof parsed.data & { employee_ids?: string[] }
+    // Campos opcionais tipados (uuid/date) chegam como '' do frontend quando
+    // vazios — o Postgres rejeita '' pra esses tipos (22P02/22007: invalid
+    // input syntax). '' significa "sem valor", equivalente a null.
+    for (const field of ['bag_id', 'scheduled_end_date'] as const) {
+      if ((jobFields as any)[field] === '') (jobFields as any)[field] = null
+    }
 
     const { data, error } = await db.from('jobs').update({ ...jobFields, updated_at: new Date().toISOString() })
       .eq('id', req.params.id).select().single()

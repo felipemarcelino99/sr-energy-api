@@ -10,10 +10,12 @@ function buildDb() {
       single: jest.fn().mockResolvedValue({ data: { id: 'doc-1', storage_kind: 'internal' }, error: null }),
     }),
   }
+  const insert = jest.fn().mockReturnValue(insertChain)
   return {
     storage: { from: jest.fn().mockReturnValue({ upload, createSignedUrl }) },
-    from: jest.fn().mockReturnValue({ insert: jest.fn().mockReturnValue(insertChain) }),
+    from: jest.fn().mockReturnValue({ insert }),
     _upload: upload,
+    _insert: insert,
   }
 }
 
@@ -42,6 +44,7 @@ describe('document-generation.service', () => {
       expect.objectContaining({ contentType: 'application/pdf' }),
     )
     expect(db.from).toHaveBeenCalledWith('documents')
+    expect(db._insert).toHaveBeenCalledWith(expect.objectContaining({ document_type: 'RT' }))
     expect(documentId).toBe('doc-1')
   })
 

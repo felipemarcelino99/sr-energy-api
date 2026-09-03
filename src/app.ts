@@ -9,6 +9,7 @@ import errorHandlerPlugin from '@/plugins/error-handler'
 import employeesRoute from '@/routes/employees'
 import machinesRoute from '@/routes/machines'
 import contractsRoute from '@/routes/contracts'
+import proposalsRoute from '@/routes/proposals'
 import jobsRoute from '@/routes/jobs'
 import reportsRoute from '@/routes/reports'
 import transactionsRoute from '@/routes/transactions'
@@ -64,6 +65,7 @@ export function buildApp() {
   app.register(employeesRoute, { prefix: '/employees' })
   app.register(machinesRoute, { prefix: '/machines' })
   app.register(contractsRoute, { prefix: '/contracts' })
+  app.register(proposalsRoute, { prefix: '/proposals' })
   app.register(jobsRoute, { prefix: '/jobs' })
   app.register(reportsRoute)
   app.register(transactionsRoute, { prefix: '/transactions' })

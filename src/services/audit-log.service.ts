@@ -1,7 +1,7 @@
 import type { SupabaseClient } from '@supabase/supabase-js'
 
 export interface AuditEvent {
-  entityType: string
+  entityType: string // 'contract' | 'job' | 'proposal' (livre para outras entidades futuras)
   entityId: string
   actorId: string
   action: string

@@ -14,10 +14,13 @@ const listQuery = z.object({
   entityId: z.string().uuid(),
 })
 
+const documentType = z.enum(['RD', 'RDO', 'RT', 'other'])
+
 const attachFields = z.object({
   entityType,
   entityId: z.string().uuid(),
   label: z.string().max(200).optional(),
+  documentType: documentType.optional(),
 })
 
 const linkLegacyBody = z.object({
@@ -26,6 +29,7 @@ const linkLegacyBody = z.object({
   driveUrl: z.string().url('URL do Drive inválida'),
   note: z.string().min(1, 'Motivo/contexto do vínculo é obrigatório'),
   label: z.string().max(200).optional(),
+  documentType: documentType.optional(),
 })
 
 // R-FUP.4: nome de arquivo do cliente nunca vira path direto (path traversal via
@@ -120,6 +124,7 @@ const documents: FastifyPluginAsync = async (fastify) => {
         bucket: 'documents',
         path,
         label: parsedFields.data.label,
+        documentType: parsedFields.data.documentType,
         actorId: req.user.id,
       })
       return reply.status(201).send(doc)

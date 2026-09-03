@@ -37,6 +37,42 @@ describe('GET /jobs — manager vê todos', () => {
   })
 })
 
+describe('GET /jobs — client_name (nome do cliente via contracts→clients)', () => {
+  it('retorna client_name resolvido quando o job tem contrato vinculado', async () => {
+    const app = buildApp()
+    app.register(jobsRoute, { prefix: '/jobs' })
+    await app.ready()
+    const rows = [{
+      id: 'j-1', status: 'scheduled', number: 'PC-0001',
+      contracts: { number: 'PC-0001', clients: { razao_social: 'Empresa Exemplo Ltda' } },
+    }]
+    mockSupabase.from.mockReturnValue({
+      select: jest.fn().mockReturnValue({
+        order: jest.fn().mockResolvedValue({ data: rows, error: null }),
+      }),
+    })
+    const res = await app.inject({ method: 'GET', url: '/jobs', headers: { 'x-test-user': mgr } })
+    expect(res.statusCode).toBe(200)
+    expect(res.json()[0].client_name).toBe('Empresa Exemplo Ltda')
+    expect(res.json()[0].contracts).toBeUndefined()
+  })
+
+  it('retorna client_name: null quando o job não tem contract_id (OS manual/legado)', async () => {
+    const app = buildApp()
+    app.register(jobsRoute, { prefix: '/jobs' })
+    await app.ready()
+    const rows = [{ id: 'j-2', status: 'scheduled', contracts: null }]
+    mockSupabase.from.mockReturnValue({
+      select: jest.fn().mockReturnValue({
+        order: jest.fn().mockResolvedValue({ data: rows, error: null }),
+      }),
+    })
+    const res = await app.inject({ method: 'GET', url: '/jobs', headers: { 'x-test-user': mgr } })
+    expect(res.statusCode).toBe(200)
+    expect(res.json()[0].client_name).toBeNull()
+  })
+})
+
 describe('GET /jobs — employee vê apenas os próprios', () => {
   it('filtra por employee_id', async () => {
     const app = buildApp()
@@ -141,6 +177,32 @@ describe('POST /jobs', () => {
     await app.ready()
     const res = await app.inject({ method: 'POST', url: '/jobs', headers: { 'x-test-user': emp }, payload: jobPayload })
     expect(res.statusCode).toBe(403)
+  })
+
+  it('aceita scheduled_end_date opcional (migration 023 — serviço de mais de um dia)', async () => {
+    const app = buildApp()
+    app.register(jobsRoute, { prefix: '/jobs' })
+    await app.ready()
+    const payloadWithRange = { ...jobPayload, scheduled_end_date: '2026-05-03' }
+    const job = { id: 'j-new', ...payloadWithRange }
+    mockSupabase.rpc.mockImplementation((fn: string, args: any) => {
+      expect(fn).toBe('create_job_with_provisioning')
+      expect(args.p_job).toMatchObject(payloadWithRange)
+      return Promise.resolve({ data: { job, insufficient_tools: [] }, error: null })
+    })
+    mockSupabase.from.mockImplementation((table: string) => {
+      if (table === 'employees') return {
+        select: jest.fn().mockReturnValue({ eq: jest.fn().mockReturnValue({ single: jest.fn().mockResolvedValue({ data: { user_id: 'u-1' }, error: null }) }) }),
+      }
+      if (table === 'notifications') return {
+        insert: jest.fn().mockResolvedValue({ error: null }),
+      }
+      return mockSupabase
+    })
+
+    const res = await app.inject({ method: 'POST', url: '/jobs', headers: { 'x-test-user': mgr }, payload: payloadWithRange })
+    expect(res.statusCode).toBe(201)
+    expect(res.json().scheduled_end_date).toBe('2026-05-03')
   })
 })
 
@@ -400,6 +462,39 @@ describe('PUT /jobs/:id — CRITICAL-01 (IDOR)', () => {
     expect(res.statusCode).toBe(404)
   })
 
+  it('manager: bag_id e scheduled_end_date vazios (\'\') viram null antes do update (Postgres rejeita \'\' pra uuid/date)', async () => {
+    const app = buildApp()
+    app.register(jobsRoute, { prefix: '/jobs' })
+    await app.ready()
+    const owned = { id: 'j-1', employee_id: 'emp-db-1' }
+    let updatePayload: any = null
+
+    mockSupabase.from.mockImplementation((table: string) => {
+      if (table === 'jobs') return {
+        select: jest.fn().mockReturnValue({
+          eq: jest.fn().mockReturnValue({ single: jest.fn().mockResolvedValue({ data: owned, error: null }) }),
+        }),
+        update: jest.fn().mockImplementation((payload: any) => {
+          updatePayload = payload
+          return {
+            eq: jest.fn().mockReturnValue({
+              select: jest.fn().mockReturnValue({ single: jest.fn().mockResolvedValue({ data: { id: 'j-1' }, error: null }) }),
+            }),
+          }
+        }),
+      }
+      return mockSupabase
+    })
+
+    const res = await app.inject({
+      method: 'PUT', url: '/jobs/j-1', headers: { 'x-test-user': mgr },
+      payload: { ...jobPayload, bag_id: '', scheduled_end_date: '' },
+    })
+    expect(res.statusCode).toBe(200)
+    expect(updatePayload.bag_id).toBeNull()
+    expect(updatePayload.scheduled_end_date).toBeNull()
+  })
+
   it('CRITICAL-01: campo administrativo (employee_id) enviado por employee é ignorado no update', async () => {
     const app = buildApp()
     app.register(jobsRoute, { prefix: '/jobs' })
@@ -488,11 +583,59 @@ describe('GET /jobs/:id — CRITICAL-07 (IDOR)', () => {
           eq: jest.fn().mockReturnValue({ single: jest.fn().mockResolvedValue({ data: { id: 'emp-db-1' }, error: null }) }),
         }),
       }
+      if (table === 'proposals') return {
+        select: jest.fn().mockReturnValue({
+          eq: jest.fn().mockReturnValue({ maybeSingle: jest.fn().mockResolvedValue({ data: null, error: null }) }),
+        }),
+      }
       return mockSupabase
     })
 
     const res = await app.inject({ method: 'GET', url: '/jobs/j-1', headers: { 'x-test-user': emp } })
     expect(res.statusCode).toBe(200)
+    expect(res.json().proposal).toBeNull()
+  })
+})
+
+describe('GET /jobs/:id — vínculo reverso com proposal (PC) de origem', () => {
+  const id = 'j-1'
+  const job = { id, employee_id: 'emp-db-1', employees: { name: 'João' }, machines: { name: 'M1' } }
+
+  it('retorna proposal: null quando a OS não nasceu de uma PC (fluxo antigo)', async () => {
+    const app = buildApp()
+    app.register(jobsRoute, { prefix: '/jobs' })
+    await app.ready()
+    mockSupabase.from.mockImplementation((table: string) => {
+      if (table === 'jobs') return {
+        select: jest.fn().mockReturnValue({ eq: jest.fn().mockReturnValue({ single: jest.fn().mockResolvedValue({ data: job, error: null }) }) }),
+      }
+      if (table === 'proposals') return {
+        select: jest.fn().mockReturnValue({ eq: jest.fn().mockReturnValue({ maybeSingle: jest.fn().mockResolvedValue({ data: null, error: null }) }) }),
+      }
+      return mockSupabase
+    })
+    const res = await app.inject({ method: 'GET', url: `/jobs/${id}`, headers: { 'x-test-user': mgr } })
+    expect(res.statusCode).toBe(200)
+    expect(res.json().proposal).toBeNull()
+  })
+
+  it('retorna a proposal (PC) de origem quando existir', async () => {
+    const app = buildApp()
+    app.register(jobsRoute, { prefix: '/jobs' })
+    await app.ready()
+    const proposal = { id: 'p-1', number: 'PC-0001' }
+    mockSupabase.from.mockImplementation((table: string) => {
+      if (table === 'jobs') return {
+        select: jest.fn().mockReturnValue({ eq: jest.fn().mockReturnValue({ single: jest.fn().mockResolvedValue({ data: job, error: null }) }) }),
+      }
+      if (table === 'proposals') return {
+        select: jest.fn().mockReturnValue({ eq: jest.fn().mockReturnValue({ maybeSingle: jest.fn().mockResolvedValue({ data: proposal, error: null }) }) }),
+      }
+      return mockSupabase
+    })
+    const res = await app.inject({ method: 'GET', url: `/jobs/${id}`, headers: { 'x-test-user': mgr } })
+    expect(res.statusCode).toBe(200)
+    expect(res.json().proposal).toEqual(proposal)
   })
 })
 
@@ -572,6 +715,11 @@ describe('job_employees — sub-plano 04 (múltiplos colaboradores por OS)', () 
           eq: jest.fn().mockReturnValue({
             eq: jest.fn().mockReturnValue({ maybeSingle: jest.fn().mockResolvedValue({ data: { job_id: 'j-os-1' }, error: null }) }),
           }),
+        }),
+      }
+      if (table === 'proposals') return {
+        select: jest.fn().mockReturnValue({
+          eq: jest.fn().mockReturnValue({ maybeSingle: jest.fn().mockResolvedValue({ data: null, error: null }) }),
         }),
       }
       return mockSupabase
@@ -828,6 +976,42 @@ describe('PUT /jobs/:id — sub-plano 04, item 4/12 (employee_ids / job_employee
       { job_id: 'j-1', employee_id: 'emp-db-1' },
       { job_id: 'j-1', employee_id: 'emp-db-2' },
     ])
+  })
+
+  it('manager persiste scheduled_end_date opcional (migration 023 — serviço de mais de um dia)', async () => {
+    const app = buildApp()
+    app.register(jobsRoute, { prefix: '/jobs' })
+    await app.ready()
+    let updatePayload: any = null
+
+    mockSupabase.from.mockImplementation((table: string) => {
+      if (table === 'jobs') return {
+        select: jest.fn().mockReturnValue({
+          eq: jest.fn().mockReturnValue({ single: jest.fn().mockResolvedValue({ data: { id: 'j-1', employee_id: 'emp-db-1' }, error: null }) }),
+        }),
+        update: jest.fn().mockImplementation((payload: any) => {
+          updatePayload = payload
+          return {
+            eq: jest.fn().mockReturnValue({
+              select: jest.fn().mockReturnValue({ single: jest.fn().mockResolvedValue({ data: { id: 'j-1', scheduled_end_date: '2026-05-03' }, error: null }) }),
+            }),
+          }
+        }),
+      }
+      if (table === 'job_employees') return {
+        delete: jest.fn().mockReturnValue({ eq: jest.fn().mockResolvedValue({ error: null }) }),
+        insert: jest.fn().mockResolvedValue({ error: null }),
+      }
+      return mockSupabase
+    })
+
+    const res = await app.inject({
+      method: 'PUT', url: '/jobs/j-1', headers: { 'x-test-user': mgr },
+      payload: { ...managerEditPayload, scheduled_end_date: '2026-05-03' },
+    })
+    expect(res.statusCode).toBe(200)
+    expect(updatePayload.scheduled_end_date).toBe('2026-05-03')
+    expect(res.json().scheduled_end_date).toBe('2026-05-03')
   })
 
   it('employee_ids enviado por employee é ignorado (campo administrativo)', async () => {

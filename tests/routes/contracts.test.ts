@@ -59,15 +59,42 @@ describe('GET /contracts', () => {
 
 describe('GET /contracts/:id', () => {
   const id = '11111111-1111-1111-1111-111111111111'
-  it('retorna o contrato', async () => {
+
+  it('retorna o contrato com proposal: null quando é um contrato manual (sem PC de origem)', async () => {
     const app = buildApp()
     app.register(contractsRoute, { prefix: '/contracts' })
     await app.ready()
-    mockSupabase.from.mockReturnValue({
-      select: jest.fn().mockReturnValue({ eq: jest.fn().mockReturnValue({ single: jest.fn().mockResolvedValue({ data: { id }, error: null }) }) }),
+    mockSupabase.from.mockImplementation((table: string) => {
+      if (table === 'contracts') {
+        return { select: jest.fn().mockReturnValue({ eq: jest.fn().mockReturnValue({ single: jest.fn().mockResolvedValue({ data: { id }, error: null }) }) }) }
+      }
+      if (table === 'proposals') {
+        return { select: jest.fn().mockReturnValue({ eq: jest.fn().mockReturnValue({ maybeSingle: jest.fn().mockResolvedValue({ data: null, error: null }) }) }) }
+      }
+      throw new Error(`unexpected table ${table}`)
     })
     const res = await app.inject({ method: 'GET', url: `/contracts/${id}`, headers: { 'x-test-user': mgr } })
     expect(res.statusCode).toBe(200)
+    expect(res.json().proposal).toBeNull()
+  })
+
+  it('retorna o contrato com a proposal (PC) de origem quando existir', async () => {
+    const app = buildApp()
+    app.register(contractsRoute, { prefix: '/contracts' })
+    await app.ready()
+    const proposal = { id: 'p-1', number: 'PC-0001' }
+    mockSupabase.from.mockImplementation((table: string) => {
+      if (table === 'contracts') {
+        return { select: jest.fn().mockReturnValue({ eq: jest.fn().mockReturnValue({ single: jest.fn().mockResolvedValue({ data: { id }, error: null }) }) }) }
+      }
+      if (table === 'proposals') {
+        return { select: jest.fn().mockReturnValue({ eq: jest.fn().mockReturnValue({ maybeSingle: jest.fn().mockResolvedValue({ data: proposal, error: null }) }) }) }
+      }
+      throw new Error(`unexpected table ${table}`)
+    })
+    const res = await app.inject({ method: 'GET', url: `/contracts/${id}`, headers: { 'x-test-user': mgr } })
+    expect(res.statusCode).toBe(200)
+    expect(res.json().proposal).toEqual(proposal)
   })
 
   it('404 quando não encontrado', async () => {
@@ -125,39 +152,17 @@ describe('DELETE /contracts/:id', () => {
 })
 
 
-describe('PATCH /contracts/:id/accept|reject — erro inesperado da RPC', () => {
-  const id = '11111111-1111-1111-1111-111111111111'
-  it('accept: erro desconhecido vira 500', async () => {
-    const app = buildApp()
-    app.register(contractsRoute, { prefix: '/contracts' })
-    await app.ready()
-    mockSupabase.rpc.mockResolvedValue({ data: null, error: { message: 'conexão perdida' } })
-    const res = await app.inject({ method: 'PATCH', url: `/contracts/${id}/accept`, headers: { 'x-test-user': mgr } })
-    expect(res.statusCode).toBe(500)
-  })
-
-  it('reject: erro desconhecido vira 500', async () => {
-    const app = buildApp()
-    app.register(contractsRoute, { prefix: '/contracts' })
-    await app.ready()
-    mockSupabase.rpc.mockResolvedValue({ data: null, error: { message: 'conexão perdida' } })
-    const res = await app.inject({ method: 'PATCH', url: `/contracts/${id}/reject`, headers: { 'x-test-user': mgr } })
-    expect(res.statusCode).toBe(500)
-  })
-})
-
-// Sub-plano 04 (fluxo PC-OS), item 1/2: número (AAXXX) e status (pending/accepted/
-// rejected) de contracts são gerados/atualizados 100% no banco (DEFAULT next_document_
-// number() e RPCs accept_contract/reject_contract) — a rota nunca calcula/lê o
-// contador em memória, o que é o que garante a atomicidade sob concorrência (mesma
-// lógica de create_job_with_provisioning/adjust_tool_stock do sub-plano 02).
-describe('POST /contracts — numeração e status não são calculados na aplicação', () => {
-  it('cria contrato sem a rota tocar em document_number_counters (número vem do DEFAULT da coluna)', async () => {
+// Sub-plano 04 (fluxo PC-OS), revisão: `status`/accept/reject saem de `contracts`
+// (movidos para `proposals`, ver tests/routes/proposals.test.ts). `contracts`
+// agora é só o contrato real — número não tem mais DEFAULT (021_proposals_split.sql),
+// pode vir null em contratos manuais/locação.
+describe('POST /contracts — criação manual (fluxo de locação)', () => {
+  it('cria contrato sem a rota tocar em document_number_counters ou RPC', async () => {
     const app = buildApp()
     app.register(contractsRoute, { prefix: '/contracts' })
     await app.ready()
 
-    const created = { id: 'c-1', client_id: 'cli-1', number: '26001', status: 'pending' }
+    const created = { id: 'c-1', client_id: 'cli-1', number: null }
     const fromSpy = jest.fn().mockReturnValue({
       insert: jest.fn().mockReturnValue({
         select: jest.fn().mockReturnValue({ single: jest.fn().mockResolvedValue({ data: created, error: null }) }),
@@ -167,151 +172,11 @@ describe('POST /contracts — numeração e status não são calculados na aplic
 
     const res = await app.inject({
       method: 'POST', url: '/contracts', headers: { 'x-test-user': mgr },
-      payload: { client_id: '33333333-3333-4333-a333-333333333333', description: 'PC teste', start_date: '2026-01-01', end_date: '2026-12-31' },
+      payload: { client_id: '33333333-3333-4333-a333-333333333333', description: 'Locação teste', start_date: '2026-01-01', end_date: '2026-12-31' },
     })
     expect(res.statusCode).toBe(201)
-    expect(res.json().number).toBe('26001')
-    expect(res.json().status).toBe('pending')
-    // A rota nunca leu/escreveu o contador diretamente — só insert em `contracts`,
-    // exatamente como o padrão de RPC/DEFAULT atômico já usado no sub-plano 02.
+    // A rota nunca leu/escreveu o contador diretamente — só insert em `contracts`.
     expect(fromSpy).not.toHaveBeenCalledWith('document_number_counters')
-    expect(mockSupabase.rpc).not.toHaveBeenCalled()
-  })
-})
-
-describe('PATCH /contracts/:id/accept', () => {
-  it('manager aceita PC pendente — RPC accept_contract cria a OS com o mesmo número', async () => {
-    const app = buildApp()
-    app.register(contractsRoute, { prefix: '/contracts' })
-    await app.ready()
-
-    const id = '11111111-1111-1111-1111-111111111111'
-    const contract = { id, number: '26001', status: 'accepted' }
-    const job = { id: 'j-1', contract_id: id, number: '26001', status: 'pending' }
-    mockSupabase.rpc.mockImplementation((fn: string, args: any) => {
-      expect(fn).toBe('accept_contract')
-      expect(args).toEqual({ p_contract_id: id })
-      return Promise.resolve({ data: { contract, job }, error: null })
-    })
-
-    const insertSpy = jest.fn().mockResolvedValue({ data: null, error: null })
-    mockSupabase.from.mockReturnValue({ insert: insertSpy })
-
-    const res = await app.inject({ method: 'PATCH', url: `/contracts/${id}/accept`, headers: { 'x-test-user': mgr } })
-    expect(res.statusCode).toBe(200)
-    expect(res.json().job.number).toBe('26001')
-    expect(res.json().contract.status).toBe('accepted')
-    expect(mockSupabase.from).toHaveBeenCalledWith('audit_log')
-    expect(insertSpy).toHaveBeenCalledWith(expect.objectContaining({
-      entity_type: 'contract',
-      entity_id: id,
-      actor_id: 'mgr-1',
-      action: 'contract.accepted',
-      metadata: { jobId: 'j-1', number: '26001' },
-    }))
-  })
-
-  it('audit-log é best-effort — falha ao gravar não derruba a resposta 200 do accept', async () => {
-    const app = buildApp()
-    app.register(contractsRoute, { prefix: '/contracts' })
-    await app.ready()
-
-    const id = '11111111-1111-1111-1111-111111111111'
-    const contract = { id, number: '26001', status: 'accepted' }
-    const job = { id: 'j-1', contract_id: id, number: '26001', status: 'pending' }
-    mockSupabase.rpc.mockResolvedValue({ data: { contract, job }, error: null })
-    mockSupabase.from.mockReturnValue({
-      insert: jest.fn().mockResolvedValue({ data: null, error: { message: 'db down' } }),
-    })
-
-    const res = await app.inject({ method: 'PATCH', url: `/contracts/${id}/accept`, headers: { 'x-test-user': mgr } })
-    expect(res.statusCode).toBe(200)
-  })
-
-  it('retorna 409 quando o contrato não está pendente (RPC rejeita a transição)', async () => {
-    const app = buildApp()
-    app.register(contractsRoute, { prefix: '/contracts' })
-    await app.ready()
-
-    const id = '11111111-1111-1111-1111-111111111111'
-    mockSupabase.rpc.mockResolvedValue({ data: null, error: { message: `contract ${id} is not pending (status=accepted)` } })
-
-    const res = await app.inject({ method: 'PATCH', url: `/contracts/${id}/accept`, headers: { 'x-test-user': mgr } })
-    expect(res.statusCode).toBe(409)
-  })
-
-  it('retorna 404 quando o contrato não existe', async () => {
-    const app = buildApp()
-    app.register(contractsRoute, { prefix: '/contracts' })
-    await app.ready()
-
-    const id = '44444444-4444-4444-4444-444444444444'
-    mockSupabase.rpc.mockResolvedValue({ data: null, error: { message: `contract ${id} not found` } })
-
-    const res = await app.inject({ method: 'PATCH', url: `/contracts/${id}/accept`, headers: { 'x-test-user': mgr } })
-    expect(res.statusCode).toBe(404)
-  })
-
-  it('employee recebe 403 (só admin/manager decidem proposta comercial)', async () => {
-    const app = buildApp()
-    app.register(contractsRoute, { prefix: '/contracts' })
-    await app.ready()
-
-    const id = '11111111-1111-1111-1111-111111111111'
-    const res = await app.inject({ method: 'PATCH', url: `/contracts/${id}/accept`, headers: { 'x-test-user': emp } })
-    expect(res.statusCode).toBe(403)
-    expect(mockSupabase.rpc).not.toHaveBeenCalled()
-  })
-})
-
-describe('PATCH /contracts/:id/reject', () => {
-  it('manager recusa PC pendente — mantém histórico, não cria OS', async () => {
-    const app = buildApp()
-    app.register(contractsRoute, { prefix: '/contracts' })
-    await app.ready()
-
-    const id = '22222222-2222-2222-2222-222222222222'
-    const contract = { id, number: '26002', status: 'rejected' }
-    mockSupabase.rpc.mockImplementation((fn: string, args: any) => {
-      expect(fn).toBe('reject_contract')
-      expect(args).toEqual({ p_contract_id: id })
-      return Promise.resolve({ data: contract, error: null })
-    })
-    const insertSpy = jest.fn().mockResolvedValue({ data: null, error: null })
-    mockSupabase.from.mockReturnValue({ insert: insertSpy })
-
-    const res = await app.inject({ method: 'PATCH', url: `/contracts/${id}/reject`, headers: { 'x-test-user': mgr } })
-    expect(res.statusCode).toBe(200)
-    expect(res.json().status).toBe('rejected')
-    expect(mockSupabase.from).toHaveBeenCalledWith('audit_log')
-    expect(insertSpy).toHaveBeenCalledWith(expect.objectContaining({
-      entity_type: 'contract',
-      entity_id: id,
-      actor_id: 'mgr-1',
-      action: 'contract.rejected',
-    }))
-  })
-
-  it('retorna 409 quando o contrato não está pendente', async () => {
-    const app = buildApp()
-    app.register(contractsRoute, { prefix: '/contracts' })
-    await app.ready()
-
-    const id = '22222222-2222-2222-2222-222222222222'
-    mockSupabase.rpc.mockResolvedValue({ data: null, error: { message: `contract ${id} is not pending (status=rejected)` } })
-
-    const res = await app.inject({ method: 'PATCH', url: `/contracts/${id}/reject`, headers: { 'x-test-user': mgr } })
-    expect(res.statusCode).toBe(409)
-  })
-
-  it('employee recebe 403', async () => {
-    const app = buildApp()
-    app.register(contractsRoute, { prefix: '/contracts' })
-    await app.ready()
-    const id = '22222222-2222-2222-2222-222222222222'
-
-    const res = await app.inject({ method: 'PATCH', url: `/contracts/${id}/reject`, headers: { 'x-test-user': emp } })
-    expect(res.statusCode).toBe(403)
     expect(mockSupabase.rpc).not.toHaveBeenCalled()
   })
 })

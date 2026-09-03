@@ -59,7 +59,9 @@ const machines: FastifyPluginAsync = async (fastify) => {
   fastify.get<{ Params: { id: string } }>('/:id/jobs', { onRequest: [guard] }, async (req, reply) => {
     const { data, error } = await db
       .from('jobs')
-      .select(`id, scheduled_date, city, state, job_type, status, employees(name)`)
+      .select(
+        `id, scheduled_date, city, state, job_type, status, employees!jobs_employee_id_fkey(name)`,
+      )
       .eq('machine_id', req.params.id)
       .order('scheduled_date', { ascending: false })
     if (error) return reply.status(500).send({ error: error.message })
