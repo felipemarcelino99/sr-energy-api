@@ -9,6 +9,7 @@ import errorHandlerPlugin from '@/plugins/error-handler'
 import employeesRoute from '@/routes/employees'
 import machinesRoute from '@/routes/machines'
 import contractsRoute from '@/routes/contracts'
+import proposalsRoute from '@/routes/proposals'
 import jobsRoute from '@/routes/jobs'
 import reportsRoute from '@/routes/reports'
 import transactionsRoute from '@/routes/transactions'
@@ -19,6 +20,8 @@ import googleAuthRoute from '@/routes/google-auth'
 import toolsRoute from '@/routes/tools'
 import bagsRoute from '@/routes/bags'
 import clientsRoute from '@/routes/clients'
+import documentsRoute from '@/routes/documents'
+import auditLogRoute from '@/routes/audit-log'
 
 export function buildApp() {
   // HIGH-03: FRONTEND_URL obrigatória em produção
@@ -62,6 +65,7 @@ export function buildApp() {
   app.register(employeesRoute, { prefix: '/employees' })
   app.register(machinesRoute, { prefix: '/machines' })
   app.register(contractsRoute, { prefix: '/contracts' })
+  app.register(proposalsRoute, { prefix: '/proposals' })
   app.register(jobsRoute, { prefix: '/jobs' })
   app.register(reportsRoute)
   app.register(transactionsRoute, { prefix: '/transactions' })
@@ -72,6 +76,8 @@ export function buildApp() {
   app.register(toolsRoute, { prefix: '/tools' })
   app.register(bagsRoute, { prefix: '/bags' })
   app.register(clientsRoute, { prefix: '/clients' })
+  app.register(documentsRoute, { prefix: '/documents' })
+  app.register(auditLogRoute, { prefix: '/audit-log' })
 
   app.get('/health', async () => ({ status: 'ok' }))
 

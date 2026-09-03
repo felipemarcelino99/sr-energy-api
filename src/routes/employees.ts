@@ -1,5 +1,6 @@
 import type { FastifyPluginAsync } from 'fastify'
 import { z } from 'zod'
+import crypto from 'node:crypto'
 import { requireRoles } from '@/plugins/authorize'
 
 // HIGH-06: whitelist explícita de campos — exclui campos internos (user_id, google_refresh_token)
@@ -27,6 +28,20 @@ const uuidParams = {
 
 // MED-04: colunas seguras — exclui google_refresh_token
 const SAFE_COLUMNS = 'id, name, email, phone, role, cnpj, salary, hired_at, created_at, updated_at, user_id'
+// HIGH-04: employee não pode ver salário de outros colaboradores (só dado técnico é
+// compartilhado; financeiro/RH é restrito a admin/manager).
+const SAFE_COLUMNS_EMPLOYEE = 'id, name, email, phone, role, cnpj, hired_at, created_at, updated_at, user_id'
+
+function columnsFor(role: string): string {
+  return role === 'employee' ? SAFE_COLUMNS_EMPLOYEE : SAFE_COLUMNS
+}
+
+// CRITICAL-03: nunca usar senha fixa. Gera senha aleatória forte (CSPRNG) que não é
+// logada nem retornada ao cliente — o colaborador precisa trocar a senha no primeiro
+// login (ver user_metadata.must_change_password).
+function generateStrongPassword(): string {
+  return crypto.randomBytes(24).toString('base64url')
+}
 
 const employees: FastifyPluginAsync = async (fastify) => {
   const db = fastify.supabase
@@ -34,9 +49,9 @@ const employees: FastifyPluginAsync = async (fastify) => {
   const adminOrManager = requireRoles('admin', 'manager')
 
   // GET /employees
-  fastify.get('/', { onRequest: [guard] }, async (_req, reply) => {
-    // MED-04: select explícito, sem google_refresh_token
-    const { data, error } = await db.from('employees').select(SAFE_COLUMNS).order('name')
+  fastify.get('/', { onRequest: [guard] }, async (req: any, reply) => {
+    // MED-04/HIGH-04: select explícito, sem google_refresh_token; sem salary para employee
+    const { data, error } = await db.from('employees').select(columnsFor(req.user.role)).order('name')
     if (error) return reply.status(500).send({ error: error.message })
     return data
   })
@@ -45,8 +60,8 @@ const employees: FastifyPluginAsync = async (fastify) => {
   fastify.get<{ Params: { id: string } }>(
     '/:id',
     { onRequest: [guard], schema: { params: uuidParams } },
-    async (req, reply) => {
-      const { data, error } = await db.from('employees').select(SAFE_COLUMNS).eq('id', req.params.id).single()
+    async (req: any, reply) => {
+      const { data, error } = await db.from('employees').select(columnsFor(req.user.role)).eq('id', req.params.id).single()
       if (error || !data) return reply.status(404).send({ error: 'Not found' })
       return data
     },
@@ -60,12 +75,17 @@ const employees: FastifyPluginAsync = async (fastify) => {
     const { data, error } = await db.from('employees').insert(parsed.data).select(SAFE_COLUMNS).single()
     if (error) return reply.status(500).send({ error: error.message })
 
-    // Cria usuário no Supabase Auth com senha padrão
+    // CRITICAL-03: senha aleatória forte via CSPRNG, nunca fixa/previsível. O
+    // colaborador é forçado a trocá-la no primeiro login (must_change_password).
+    // Deviation do plano original: preferia Supabase generateLink, mas o projeto não
+    // tem infra de envio de e-mail integrada para entregar o link com segurança —
+    // ver relatório final do sub-plano 01 para detalhes.
+    const temporaryPassword = generateStrongPassword()
     const { data: authData, error: authError } = await db.auth.admin.createUser({
       email: parsed.data.email,
-      password: 'srenergy@123',
+      password: temporaryPassword,
       email_confirm: true,
-      user_metadata: { role: parsed.data.role, name: parsed.data.name },
+      user_metadata: { role: parsed.data.role, name: parsed.data.name, must_change_password: true },
     })
 
     if (!authError && authData?.user) {

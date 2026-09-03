@@ -4,6 +4,7 @@ import { createHash } from 'crypto'
 import { indexMachineManual } from '@/services/rag.service'
 import { uploadFile } from '@/services/storage.service'
 import { getOrGenerateOverview } from '@/services/rag.overview.service'
+import { requireRoles } from '@/plugins/authorize'
 
 const machineBody = z.object({
   name: z.string().min(2),
@@ -17,6 +18,7 @@ const machineBody = z.object({
 const machines: FastifyPluginAsync = async (fastify) => {
   const db = fastify.supabase
   const guard = (fastify as any).authenticate
+  const adminOrManager = requireRoles('admin', 'manager')
 
   fastify.get('/', { onRequest: [guard] }, async (_req, reply) => {
     const { data, error } = await db.from('machines').select('*').order('name')
@@ -57,7 +59,9 @@ const machines: FastifyPluginAsync = async (fastify) => {
   fastify.get<{ Params: { id: string } }>('/:id/jobs', { onRequest: [guard] }, async (req, reply) => {
     const { data, error } = await db
       .from('jobs')
-      .select(`id, scheduled_date, city, state, job_type, status, employees(name)`)
+      .select(
+        `id, scheduled_date, city, state, job_type, status, employees!jobs_employee_id_fkey(name)`,
+      )
       .eq('machine_id', req.params.id)
       .order('scheduled_date', { ascending: false })
     if (error) return reply.status(500).send({ error: error.message })
@@ -79,9 +83,7 @@ const machines: FastifyPluginAsync = async (fastify) => {
   })
 
   // POST /machines/:id/tools
-  fastify.post<{ Params: { id: string } }>('/:id/tools', { onRequest: [guard] }, async (req: any, reply) => {
-    if (!['manager', 'admin'].includes(req.user.role))
-      return reply.status(403).send({ error: 'Forbidden' })
+  fastify.post<{ Params: { id: string } }>('/:id/tools', { onRequest: [guard, adminOrManager] }, async (req: any, reply) => {
     const parsed = z.object({
       tool_id: z.string().uuid(),
       quantity_required: z.coerce.number().int().min(1).default(1),
@@ -97,9 +99,7 @@ const machines: FastifyPluginAsync = async (fastify) => {
   })
 
   // DELETE /machines/:id/tools/:toolId
-  fastify.delete<{ Params: { id: string; toolId: string } }>('/:id/tools/:toolId', { onRequest: [guard] }, async (req: any, reply) => {
-    if (!['manager', 'admin'].includes(req.user.role))
-      return reply.status(403).send({ error: 'Forbidden' })
+  fastify.delete<{ Params: { id: string; toolId: string } }>('/:id/tools/:toolId', { onRequest: [guard, adminOrManager] }, async (req: any, reply) => {
     const { error } = await db
       .from('machine_tools')
       .delete()
@@ -120,9 +120,7 @@ const machines: FastifyPluginAsync = async (fastify) => {
   })
 
   // POST /machines/:id/manual
-  fastify.post<{ Params: { id: string } }>('/:id/manual', { onRequest: [guard] }, async (req: any, reply) => {
-    if (!['manager', 'admin'].includes(req.user.role))
-      return reply.status(403).send({ error: 'Acesso negado' })
+  fastify.post<{ Params: { id: string } }>('/:id/manual', { onRequest: [guard, adminOrManager] }, async (req: any, reply) => {
     const file = await req.file()
     if (!file) return reply.status(400).send({ error: 'Arquivo não enviado' })
     const buffer = await file.toBuffer()
@@ -144,17 +142,17 @@ const machines: FastifyPluginAsync = async (fastify) => {
     const url = await uploadFile(fastify.supabase, 'machine-manuals', storagePath, buffer, 'application/pdf')
     await db.from('machine_documents').update({ url }).eq('id', doc.id)
 
-    indexMachineManual(fastify.supabase, req.params.id, doc.id, buffer).catch(console.error)
+    indexMachineManual(fastify.supabase, req.params.id, doc.id, buffer).catch((err) =>
+      fastify.log.error(err, 'machine manual indexing failed'),
+    )
     return reply.status(201).send({ id: doc.id, filename, url })
   })
 
   // DELETE /machines/:id/documents/:docId
   fastify.delete<{ Params: { id: string; docId: string } }>(
     '/:id/documents/:docId',
-    { onRequest: [guard] },
+    { onRequest: [guard, adminOrManager] },
     async (req: any, reply) => {
-      if (!['manager', 'admin'].includes(req.user.role))
-        return reply.status(403).send({ error: 'Acesso negado' })
       const { data: doc } = await db.from('machine_documents')
         .select('id').eq('id', req.params.docId).eq('machine_id', req.params.id).single()
       if (!doc) return reply.status(404).send({ error: 'Documento não encontrado' })

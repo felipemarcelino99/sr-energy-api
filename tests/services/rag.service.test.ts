@@ -2,9 +2,11 @@ import * as ragService from '@/services/rag.service'
 import { chunkText } from '@/services/rag.service'
 import { findCuratedAnswer } from '@/services/rag.curated.service'
 import Anthropic from '@anthropic-ai/sdk'
+import Groq from 'groq-sdk'
 import { VoyageAIClient } from 'voyageai'
 
 jest.mock('@anthropic-ai/sdk')
+jest.mock('groq-sdk')
 jest.mock('voyageai')
 jest.mock('@/services/rag.curated.service')
 
@@ -57,9 +59,9 @@ describe('compareAcrossMachines', () => {
     })
 
     const mockCreate = jest.fn().mockResolvedValue({
-      content: [{ type: 'text', text: 'Máquina 1 suporta mais pressão.' }],
+      choices: [{ message: { content: 'Máquina 1 suporta mais pressão.' } }],
     })
-    ;(Anthropic as unknown as jest.Mock).mockImplementation(() => ({ messages: { create: mockCreate } }))
+    ;(Groq as unknown as jest.Mock).mockImplementation(() => ({ chat: { completions: { create: mockCreate } } }))
 
     const result = await ragService.compareAcrossMachines(
       mockSupabase,

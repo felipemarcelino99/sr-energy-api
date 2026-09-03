@@ -1,7 +1,7 @@
 import { getOrGenerateOverview } from '@/services/rag.overview.service'
-import Anthropic from '@anthropic-ai/sdk'
+import Groq from 'groq-sdk'
 
-jest.mock('@anthropic-ai/sdk')
+jest.mock('groq-sdk')
 
 const makeSupabase = (machineRow: any, overviewRow: any, chunksData: any): any => {
   const fromMock = jest.fn().mockImplementation((table: string) => {
@@ -46,9 +46,9 @@ describe('getOrGenerateOverview', () => {
 
   it('generates and caches overview when hash differs', async () => {
     const mockCreate = jest.fn().mockResolvedValue({
-      content: [{ type: 'text', text: 'Overview gerado' }],
+      choices: [{ message: { content: 'Overview gerado' } }],
     })
-    ;(Anthropic as unknown as jest.Mock).mockImplementation(() => ({ messages: { create: mockCreate } }))
+    ;(Groq as unknown as jest.Mock).mockImplementation(() => ({ chat: { completions: { create: mockCreate } } }))
 
     const supabase = makeSupabase(
       { pdf_hash: 'newHash', name: 'Máquina A' },

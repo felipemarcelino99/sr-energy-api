@@ -13,8 +13,10 @@ export const mockSupabase: any = {
   order: jest.fn().mockReturnThis(),
   lte: jest.fn().mockReturnThis(),
   gte: jest.fn().mockReturnThis(),
+  in: jest.fn().mockReturnThis(),
   storage: { from: jest.fn() },
   rpc: jest.fn(),
+  auth: { admin: { createUser: jest.fn() } },
 }
 
 export function buildApp() {

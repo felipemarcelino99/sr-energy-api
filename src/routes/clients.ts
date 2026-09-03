@@ -31,6 +31,13 @@ const uuidParams = {
 
 const SELECT_CLIENT = 'id, razao_social, cnpj, segmento, email, telefone, celular, status, endereco, created_at, updated_at'
 
+// MED-09: escapa caracteres com significado especial no filtro PostgREST (`,` separa
+// condições do `.or()`, `.` separa operador/coluna, `%`/`*` são coringas do `ilike`).
+// Sem isso, um search malicioso poderia injetar condições extras no filtro.
+function escapePostgrestLike(value: string): string {
+  return value.replace(/[,.%*]/g, (c) => `\\${c}`)
+}
+
 const clients: FastifyPluginAsync = async (fastify) => {
   const db = fastify.supabase
   const guard = (fastify as any).authenticate
@@ -41,7 +48,8 @@ const clients: FastifyPluginAsync = async (fastify) => {
     const { search } = req.query as { search?: string }
     let query = db.from('clients').select(SELECT_CLIENT).order('razao_social')
     if (search) {
-      query = query.or(`razao_social.ilike.%${search}%,cnpj.ilike.%${search}%`)
+      const safeSearch = escapePostgrestLike(search)
+      query = query.or(`razao_social.ilike.%${safeSearch}%,cnpj.ilike.%${safeSearch}%`)
     }
     const { data, error } = await query
     if (error) return reply.status(500).send({ error: error.message })

@@ -2,6 +2,7 @@ import type { FastifyPluginAsync } from 'fastify'
 import { z } from 'zod'
 import { uploadFile } from '@/services/storage.service'
 import { requireRoles } from '@/plugins/authorize'
+import { detectMimeFromBuffer } from '@/utils/file-signature'
 
 // HIGH-06: whitelist de campos
 const contractBody = z.object({
@@ -23,21 +24,12 @@ const uuidParams = {
   required: ['id'],
 } as const
 
-// HIGH-07: verificação de magic bytes sem dependência externa
-const ALLOWED_SIGNATURES: Array<{ mime: string; bytes: number[] }> = [
-  { mime: 'application/pdf', bytes: [0x25, 0x50, 0x44, 0x46] }, // %PDF
-  { mime: 'image/jpeg',      bytes: [0xFF, 0xD8, 0xFF] },
-  { mime: 'image/png',       bytes: [0x89, 0x50, 0x4E, 0x47] },
-]
-
-function detectMimeFromBuffer(buf: Buffer): string | null {
-  for (const sig of ALLOWED_SIGNATURES) {
-    if (sig.bytes.every((b, i) => buf[i] === b)) return sig.mime
-  }
-  return null
-}
-
-const SELECT_CONTRACT = 'id, client_id, description, start_date, end_date, contract_type, contract_value, recurring, file_url, created_at, updated_at, clients(id, razao_social, cnpj)'
+// Sub-plano 04 (fluxo PC-OS), revisão: `status` saiu de `contracts` — a Proposta
+// Comercial (PC) agora vive em `proposals` (ver
+// supabase/migrations/021_proposals_split.sql). `contracts` só existe como
+// contrato real (criado manualmente aqui, ou automaticamente por
+// `accept_proposal` — ver src/routes/proposals.ts).
+const SELECT_CONTRACT = 'id, client_id, number, description, start_date, end_date, contract_type, contract_value, recurring, file_url, created_at, updated_at, clients(id, razao_social, cnpj)'
 
 const contracts: FastifyPluginAsync = async (fastify) => {
   const db = fastify.supabase
@@ -75,7 +67,16 @@ const contracts: FastifyPluginAsync = async (fastify) => {
         .select(SELECT_CONTRACT)
         .eq('id', req.params.id).single()
       if (error || !data) return reply.status(404).send({ error: 'Not found' })
-      return data
+
+      // Vínculo reverso: no máximo uma proposal (PC) aponta para este contrato
+      // (contracts.id é o alvo de proposals.contract_id, único por natureza do
+      // fluxo accept_proposal). Contratos manuais (locação, sem PC de origem)
+      // simplesmente não têm proposal correspondente.
+      const { data: proposal } = await db.from('proposals')
+        .select('id, number')
+        .eq('contract_id', req.params.id).maybeSingle()
+
+      return { ...data, proposal: proposal ?? null }
     },
   )
 
