@@ -2,6 +2,7 @@ import PDFDocument from 'pdfkit'
 import type { SupabaseClient } from '@supabase/supabase-js'
 import { uploadFile } from '@/services/storage.service'
 import { attachDocument } from '@/services/documents.service'
+import { renderReportHtml } from '@/utils/richTextPdf'
 
 // Item 8 (spike) — decisão: geração via `pdfkit` (layout programático, puro
 // Node), não HTML+CSS→PDF via headless Chromium (Puppeteer) nem merge de
@@ -17,6 +18,14 @@ import { attachDocument } from '@/services/documents.service'
 // pixel-a-pixel com o padrão visual do portal) — aceitável para a primeira
 // fatia da feature; se o time de produto exigir fidelidade visual maior no
 // futuro, revisitar com Puppeteer.
+//
+// Atualização: o corpo do relatório (`data.reportContent`, HTML do
+// RichTextEditor/TipTap) não é mais escrito cru via `doc.text()` — isso
+// perdia toda formatação (negrito/itálico/sublinhado/headings/listas viravam
+// texto plano). `renderReportHtml` (src/utils/richTextPdf.ts) faz o parse do
+// subconjunto restrito de HTML que o TipTap gera e desenha cada trecho com a
+// fonte/estilo certos no pdfkit. Ainda não é HTML+CSS→PDF genérico (não author
+// arbitrário, só o que o editor produz), mas cobre o caso real de uso.
 
 export interface ReportPdfData {
   jobNumber: string
@@ -48,17 +57,18 @@ function buildPdfBuffer(data: ReportPdfData): Promise<Buffer> {
     doc.text(`Responsável: ${data.employeeName}`)
     doc.moveDown()
 
-    doc.fontSize(13).text('Escopo')
-    doc.fontSize(11).text(data.description)
+    doc.fontSize(13).font('Helvetica-Bold').text('Escopo')
+    doc.fontSize(11).font('Helvetica').text(data.description)
     doc.moveDown()
 
-    doc.fontSize(13).text('Relatório')
-    doc.fontSize(11).text(data.reportContent)
+    doc.fontSize(13).font('Helvetica-Bold').text('Relatório')
+    doc.font('Helvetica')
+    renderReportHtml(doc, data.reportContent, 11)
     doc.moveDown()
 
     if (data.evidences.length > 0) {
-      doc.fontSize(13).text('Evidências anexadas')
-      doc.fontSize(11)
+      doc.fontSize(13).font('Helvetica-Bold').text('Evidências anexadas')
+      doc.fontSize(11).font('Helvetica')
       for (const ev of data.evidences) {
         doc.text(`• ${ev.fileName} (${ev.type})`)
       }
