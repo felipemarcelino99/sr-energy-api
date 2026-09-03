@@ -57,6 +57,25 @@ describe('GET /proposals/:id', () => {
     expect(res.statusCode).toBe(200)
   })
 
+  it('quando a proposta está aceita, retorna contrato e OS embedados', async () => {
+    const app = buildApp()
+    app.register(proposalsRoute, { prefix: '/proposals' })
+    await app.ready()
+    const contract = { id: 'c-1', number: '26001', contract_value: 15000, start_date: '2026-01-01', end_date: '2026-12-31' }
+    const job = {
+      id: 'j-1', number: '26001', status: 'scheduled', scheduled_date: '2026-02-01', scheduled_end_date: null,
+      city: 'Curitiba', state: 'PR', employees: { name: 'João' }, machines: { name: 'Retro' },
+    }
+    const data = { id, status: 'accepted', contract_id: 'c-1', job_id: 'j-1', contracts: contract, jobs: job }
+    mockSupabase.from.mockReturnValue({
+      select: jest.fn().mockReturnValue({ eq: jest.fn().mockReturnValue({ single: jest.fn().mockResolvedValue({ data, error: null }) }) }),
+    })
+    const res = await app.inject({ method: 'GET', url: `/proposals/${id}`, headers: { 'x-test-user': mgr } })
+    expect(res.statusCode).toBe(200)
+    expect(res.json().contracts).toEqual(contract)
+    expect(res.json().jobs).toEqual(job)
+  })
+
   it('404 quando não encontrado', async () => {
     const app = buildApp()
     app.register(proposalsRoute, { prefix: '/proposals' })

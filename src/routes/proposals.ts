@@ -27,7 +27,17 @@ const uuidParams = {
   required: ['id'],
 } as const
 
-const SELECT_PROPOSAL = 'id, number, client_id, description, contract_type, contract_value, recurring, start_date, end_date, file_url, status, contract_id, job_id, created_at, updated_at, clients(id, razao_social, cnpj)'
+// Visão macro na tela da PC: embeda um resumo do Contrato e da OS gerados na
+// aceitação (contract_id/job_id só ficam preenchidos depois de aceita — nas
+// demais, os embeds abaixo vêm null, sem custo extra de query). `employees`
+// dentro de `jobs` precisa do hint `!fkey` porque job tem duas FKs possíveis
+// pra employees (employee_id legado + job_employees) — mesmo achado já
+// resolvido em jobs.ts.
+const SELECT_PROPOSAL =
+  'id, number, client_id, description, contract_type, contract_value, recurring, start_date, end_date, file_url, status, contract_id, job_id, created_at, updated_at, ' +
+  'clients(id, razao_social, cnpj), ' +
+  'contracts(id, number, contract_value, start_date, end_date), ' +
+  'jobs(id, number, status, scheduled_date, scheduled_end_date, city, state, employees!jobs_employee_id_fkey(name), machines(name))'
 
 // Sub-plano 04, item 5: transição de status de proposta grava no audit-log
 // (append-only, ver supabase/migrations/019_audit_log.sql). Best-effort — nunca
