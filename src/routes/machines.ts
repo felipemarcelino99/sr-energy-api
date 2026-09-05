@@ -77,7 +77,6 @@ const machines: FastifyPluginAsync = async (fastify) => {
       .from('machine_tools')
       .select('*, tools(*)')
       .eq('machine_id', req.params.id)
-      .order('created_at' as any)
     if (error) return reply.status(500).send({ error: error.message })
     return data ?? []
   })

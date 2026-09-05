@@ -100,14 +100,16 @@ describe('GET /employees/:id', () => {
 })
 
 describe('POST /employees', () => {
-  it('cria funcionário, gera senha aleatória (CRITICAL-03) e retorna 201', async () => {
+  it('cria funcionário com a senha enviada pelo admin (CRITICAL-03: nunca fixa/gerada pelo servidor) e retorna 201', async () => {
     const app = buildApp()
     app.register(employeesRoute, { prefix: '/employees' })
     await app.ready()
 
+    const password = 'Str0ng!Passw0rd42'
     const body = { name: 'Maria', email: 'maria@sr.com', phone: '11999990001',
-      role: 'employee', salary: 5000, hired_at: '2024-01-01' }
-    const created = { id: 'emp-new', ...body }
+      role: 'employee', salary: 5000, hired_at: '2024-01-01', password }
+    const created = { id: 'emp-new', name: body.name, email: body.email, phone: body.phone,
+      role: body.role, salary: body.salary, hired_at: body.hired_at }
 
     mockSupabase.from.mockImplementation((table: string) => {
       if (table === 'employees') return {
@@ -136,8 +138,7 @@ describe('POST /employees', () => {
     expect(res.json().id).toBe('emp-new')
 
     const createUserCall = mockSupabase.auth.admin.createUser.mock.calls[0][0]
-    expect(createUserCall.password).not.toBe('srenergy@123')
-    expect(createUserCall.password.length).toBeGreaterThanOrEqual(20)
+    expect(createUserCall.password).toBe(password)
     expect(createUserCall.user_metadata.must_change_password).toBe(true)
     expect(res.json().password).toBeUndefined()
   })
@@ -159,8 +160,9 @@ describe('POST /employees', () => {
     app.register(employeesRoute, { prefix: '/employees' })
     await app.ready()
     const body = { name: 'Maria', email: 'maria@sr.com', phone: '11999990001',
-      role: 'employee', salary: 5000, hired_at: '2024-01-01' }
-    const created = { id: 'emp-new', ...body }
+      role: 'employee', salary: 5000, hired_at: '2024-01-01', password: 'Str0ng!Passw0rd42' }
+    const created = { id: 'emp-new', name: body.name, email: body.email, phone: body.phone,
+      role: body.role, salary: body.salary, hired_at: body.hired_at }
     mockSupabase.from.mockReturnValue({
       insert: jest.fn().mockReturnValue({
         select: jest.fn().mockReturnValue({ single: jest.fn().mockResolvedValue({ data: created, error: null }) }),

@@ -1,6 +1,5 @@
 import type { FastifyPluginAsync } from 'fastify'
 import { z } from 'zod'
-import crypto from 'node:crypto'
 import { requireRoles } from '@/plugins/authorize'
 
 // HIGH-06: whitelist explícita de campos — exclui campos internos (user_id, google_refresh_token)
@@ -12,6 +11,12 @@ const employeeBody = z.object({
   cnpj: z.string().optional(),
   salary: z.coerce.number().positive(),
   hired_at: z.string().min(1),
+})
+
+// Password is admin-chosen (generated client-side, shown once so it can be
+// handed to the employee) — only required on creation, never on PUT.
+const employeeCreateBody = employeeBody.extend({
+  password: z.string().min(12, 'A senha deve ter ao menos 12 caracteres'),
 })
 
 const salaryAdjBody = z.object({
@@ -34,13 +39,6 @@ const SAFE_COLUMNS_EMPLOYEE = 'id, name, email, phone, role, cnpj, hired_at, cre
 
 function columnsFor(role: string): string {
   return role === 'employee' ? SAFE_COLUMNS_EMPLOYEE : SAFE_COLUMNS
-}
-
-// CRITICAL-03: nunca usar senha fixa. Gera senha aleatória forte (CSPRNG) que não é
-// logada nem retornada ao cliente — o colaborador precisa trocar a senha no primeiro
-// login (ver user_metadata.must_change_password).
-function generateStrongPassword(): string {
-  return crypto.randomBytes(24).toString('base64url')
 }
 
 const employees: FastifyPluginAsync = async (fastify) => {
@@ -69,23 +67,24 @@ const employees: FastifyPluginAsync = async (fastify) => {
 
   // POST /employees — HIGH-01: apenas admin ou manager
   fastify.post('/', { onRequest: [guard, adminOrManager] }, async (req, reply) => {
-    const parsed = employeeBody.safeParse(req.body)
+    const parsed = employeeCreateBody.safeParse(req.body)
     if (!parsed.success) return reply.status(400).send({ error: parsed.error.flatten() })
+    const { password, ...employeeFields } = parsed.data
 
-    const { data, error } = await db.from('employees').insert(parsed.data).select(SAFE_COLUMNS).single()
+    const { data, error } = await db.from('employees').insert(employeeFields).select(SAFE_COLUMNS).single()
     if (error) return reply.status(500).send({ error: error.message })
 
-    // CRITICAL-03: senha aleatória forte via CSPRNG, nunca fixa/previsível. O
-    // colaborador é forçado a trocá-la no primeiro login (must_change_password).
-    // Deviation do plano original: preferia Supabase generateLink, mas o projeto não
-    // tem infra de envio de e-mail integrada para entregar o link com segurança —
+    // CRITICAL-03: nunca senha fixa/previsível — o admin gera e copia uma senha
+    // forte (CSPRNG) na tela de criação para entregar ao colaborador, que é
+    // forçado a trocá-la no primeiro login (must_change_password). Deviation do
+    // plano original: preferia Supabase generateLink, mas o projeto não tem
+    // infra de envio de e-mail integrada para entregar o link com segurança —
     // ver relatório final do sub-plano 01 para detalhes.
-    const temporaryPassword = generateStrongPassword()
     const { data: authData, error: authError } = await db.auth.admin.createUser({
-      email: parsed.data.email,
-      password: temporaryPassword,
+      email: employeeFields.email,
+      password,
       email_confirm: true,
-      user_metadata: { role: parsed.data.role, name: parsed.data.name, must_change_password: true },
+      user_metadata: { role: employeeFields.role, name: employeeFields.name, must_change_password: true },
     })
 
     if (!authError && authData?.user) {
