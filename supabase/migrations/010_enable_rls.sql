@@ -12,6 +12,10 @@ CREATE POLICY "emp_admin_all" ON employees FOR ALL
   ));
 
 -- Contracts
+-- Migration órfã reconstruída: employee_user_id existia no remoto sem migration local correspondente,
+-- quebrando `supabase start` do zero. IF NOT EXISTS mantém idempotência caso já exista no schema alvo.
+ALTER TABLE contracts ADD COLUMN IF NOT EXISTS employee_user_id uuid REFERENCES auth.users(id);
+
 ALTER TABLE contracts ENABLE ROW LEVEL SECURITY;
 
 CREATE POLICY "contracts_self_select" ON contracts FOR SELECT

@@ -802,12 +802,17 @@ describe('GET /jobs/:id/checklist', () => {
     app.register(jobsRoute, { prefix: '/jobs' })
     await app.ready()
     const items = [{ id: 'c-1', job_id: 'j-1', checked: false, phase: 'pre_work', tools: { id: 't-1', name: 'Multímetro' } }]
-    mockSupabase.from.mockReturnValue({
-      select: jest.fn().mockReturnValue({
-        eq: jest.fn().mockReturnValue({
-          order: jest.fn().mockResolvedValue({ data: items, error: null }),
+    mockSupabase.from.mockImplementation((table: string) => {
+      if (table === 'jobs') return {
+        select: jest.fn().mockReturnValue({ eq: jest.fn().mockReturnValue({ single: jest.fn().mockResolvedValue({ data: { id: 'j-1', employee_id: null }, error: null }) }) }),
+      }
+      return {
+        select: jest.fn().mockReturnValue({
+          eq: jest.fn().mockReturnValue({
+            order: jest.fn().mockResolvedValue({ data: items, error: null }),
+          }),
         }),
-      }),
+      }
     })
     const res = await app.inject({ method: 'GET', url: '/jobs/j-1/checklist', headers: { 'x-test-user': mgr } })
     expect(res.statusCode).toBe(200)
@@ -821,14 +826,19 @@ describe('PATCH /jobs/:id/checklist/:itemId', () => {
     app.register(jobsRoute, { prefix: '/jobs' })
     await app.ready()
     const updated = { id: 'c-1', checked: true, checked_at: '2026-05-01T10:00:00Z' }
-    mockSupabase.from.mockReturnValue({
-      update: jest.fn().mockReturnValue({
-        eq: jest.fn().mockReturnValue({
+    mockSupabase.from.mockImplementation((table: string) => {
+      if (table === 'jobs') return {
+        select: jest.fn().mockReturnValue({ eq: jest.fn().mockReturnValue({ single: jest.fn().mockResolvedValue({ data: { id: 'j-1', employee_id: null }, error: null }) }) }),
+      }
+      return {
+        update: jest.fn().mockReturnValue({
           eq: jest.fn().mockReturnValue({
-            select: jest.fn().mockReturnValue({ single: jest.fn().mockResolvedValue({ data: updated, error: null }) }),
+            eq: jest.fn().mockReturnValue({
+              select: jest.fn().mockReturnValue({ single: jest.fn().mockResolvedValue({ data: updated, error: null }) }),
+            }),
           }),
         }),
-      }),
+      }
     })
     const res = await app.inject({
       method: 'PATCH', url: '/jobs/j-1/checklist/c-1', headers: { 'x-test-user': mgr },
@@ -842,6 +852,9 @@ describe('PATCH /jobs/:id/checklist/:itemId', () => {
     const app = buildApp()
     app.register(jobsRoute, { prefix: '/jobs' })
     await app.ready()
+    mockSupabase.from.mockReturnValue({
+      select: jest.fn().mockReturnValue({ eq: jest.fn().mockReturnValue({ single: jest.fn().mockResolvedValue({ data: { id: 'j-1', employee_id: null }, error: null }) }) }),
+    })
     const res = await app.inject({
       method: 'PATCH', url: '/jobs/j-1/checklist/c-1', headers: { 'x-test-user': mgr },
       payload: { checked: 'sim' },
@@ -862,7 +875,12 @@ describe('POST /jobs/:id/checklist/duplicate', () => {
 
     mockSupabase.from.mockImplementation(() => {
       callCount++
-      if (callCount === 1) return { // verifica existência de pre_report
+      if (callCount === 1) return { // loadOwnedJob
+        select: jest.fn().mockReturnValue({
+          eq: jest.fn().mockReturnValue({ single: jest.fn().mockResolvedValue({ data: { id: 'j-1', employee_id: null }, error: null }) }),
+        }),
+      }
+      if (callCount === 2) return { // verifica existência de pre_report
         select: jest.fn().mockReturnValue({
           eq: jest.fn().mockReturnValue({
             eq: jest.fn().mockReturnValue({
@@ -871,7 +889,7 @@ describe('POST /jobs/:id/checklist/duplicate', () => {
           }),
         }),
       }
-      if (callCount === 2) return { // busca pre_work
+      if (callCount === 3) return { // busca pre_work
         select: jest.fn().mockReturnValue({
           eq: jest.fn().mockReturnValue({
             eq: jest.fn().mockResolvedValue({ data: preWorkItems, error: null }),
@@ -900,7 +918,12 @@ describe('POST /jobs/:id/checklist/duplicate', () => {
 
     mockSupabase.from.mockImplementation(() => {
       callCount++
-      if (callCount === 1) return {
+      if (callCount === 1) return { // loadOwnedJob
+        select: jest.fn().mockReturnValue({
+          eq: jest.fn().mockReturnValue({ single: jest.fn().mockResolvedValue({ data: { id: 'j-1', employee_id: null }, error: null }) }),
+        }),
+      }
+      if (callCount === 2) return {
         select: jest.fn().mockReturnValue({
           eq: jest.fn().mockReturnValue({
             eq: jest.fn().mockReturnValue({

@@ -5,7 +5,8 @@ import { requireRoles } from '@/plugins/authorize'
 import { detectMimeFromBuffer } from '@/utils/file-signature'
 
 // HIGH-06: whitelist de campos
-const contractBody = z.object({
+// zod v4 não permite .partial() em schema com .refine() — base separada do refine
+const contractBodyBase = z.object({
   client_id: z.string().uuid('Cliente é obrigatório'),
   description: z.string().min(1).max(2000),
   start_date: z.string().min(1),
@@ -13,9 +14,14 @@ const contractBody = z.object({
   contract_type: z.enum(['service', 'rental']).optional(),
   contract_value: z.number().min(0).optional(),
   recurring: z.boolean().optional(),
-}).refine(d => new Date(d.end_date) >= new Date(d.start_date), {
+})
+const contractBody = contractBodyBase.refine(d => new Date(d.end_date) >= new Date(d.start_date), {
   message: 'end_date must be after start_date', path: ['end_date'],
 })
+const contractBodyPartial = contractBodyBase.partial().refine(
+  d => !d.start_date || !d.end_date || new Date(d.end_date) >= new Date(d.start_date),
+  { message: 'end_date must be after start_date', path: ['end_date'] },
+)
 
 // HIGH-05: schema de validação UUID para path params
 const uuidParams = {
@@ -93,7 +99,7 @@ const contracts: FastifyPluginAsync = async (fastify) => {
     '/:id',
     { onRequest: [guard, adminOrManager], schema: { params: uuidParams } },
     async (req, reply) => {
-      const parsed = contractBody.partial().safeParse(req.body)
+      const parsed = contractBodyPartial.safeParse(req.body)
       if (!parsed.success) return reply.status(400).send({ error: parsed.error.flatten() })
       const { data, error } = await db.from('contracts')
         .update({ ...parsed.data, updated_at: new Date().toISOString() })

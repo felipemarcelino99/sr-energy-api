@@ -62,8 +62,14 @@ const reports: FastifyPluginAsync = async (fastify) => {
     if (!parsed.success) return reply.status(400).send({ error: parsed.error.flatten() })
     if (!(await assertJobOwnership(db, req, reply))) return
     const { data: emp } = await db.from('employees').select('id').eq('user_id', req.user.id).single()
-    // admin/manager podem não ter registro de employee — nesse caso não amarramos employee_id
-    const employeeId = emp?.id ?? null
+    // admin/manager podem não ter registro de employee — job_reports.employee_id é NOT NULL,
+    // então cai pro employee dono do job (o relatório é sobre o job, não sobre quem preencheu).
+    let employeeId = emp?.id ?? null
+    if (!employeeId) {
+      const { data: job } = await db.from('jobs').select('employee_id').eq('id', req.params.id).single()
+      employeeId = job?.employee_id ?? null
+    }
+    if (!employeeId) return reply.status(422).send({ error: 'Job sem funcionário responsável atribuído' })
     const { data, error } = await db.from('job_reports')
       .insert({ job_id: req.params.id, content: parsed.data.content, employee_id: employeeId })
       .select().single()

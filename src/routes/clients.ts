@@ -97,10 +97,21 @@ const clients: FastifyPluginAsync = async (fastify) => {
   )
 
   // DELETE /clients/:id (admin only)
+  // Achado da auditoria 2026-09-15: FK contracts.client_id/proposals.client_id são
+  // ON DELETE SET NULL, então deletar um cliente com vínculo ativo "sucedia" com 204
+  // mas deixava contrato/proposta órfão silenciosamente (client_id: null). Checa
+  // vínculo antes e responde 409, igual ao padrão de erro tratado do resto da API.
   fastify.delete<{ Params: { id: string } }>(
     '/:id',
     { onRequest: [guard, requireRoles('admin')], schema: { params: uuidParams } },
     async (req, reply) => {
+      const [{ count: contractCount }, { count: proposalCount }] = await Promise.all([
+        db.from('contracts').select('id', { count: 'exact', head: true }).eq('client_id', req.params.id),
+        db.from('proposals').select('id', { count: 'exact', head: true }).eq('client_id', req.params.id),
+      ])
+      if ((contractCount ?? 0) > 0 || (proposalCount ?? 0) > 0) {
+        return reply.status(409).send({ error: 'Cliente possui contratos ou propostas vinculados e não pode ser excluído.' })
+      }
       const { error } = await db.from('clients').delete().eq('id', req.params.id)
       if (error) return reply.status(500).send({ error: error.message })
       return reply.status(204).send()

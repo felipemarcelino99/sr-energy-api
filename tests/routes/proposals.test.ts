@@ -132,12 +132,9 @@ describe('POST /proposals', () => {
 
 describe('PUT /proposals/:id', () => {
   const id = '11111111-1111-1111-1111-111111111111'
-  // NOTA (mesmo achado pré-existente documentado em tests/routes/contracts.test.ts):
-  // `proposalBody.partial()` falha em runtime porque o schema usa `.refine()`
-  // (zod v4 não permite `.partial()` em objeto com refinement), então
-  // PUT /proposals/:id hoje sempre responde 500. Não é regressão desta tarefa —
-  // é o mesmo padrão herdado de contracts.ts.
-  it('rota atualmente sempre falha com 500 devido a bug pré-existente (.partial() + .refine() no zod v4)', async () => {
+  // Fix: mesmo padrão de tests/routes/contracts.test.ts — `proposalBody` dividido
+  // em base (aceita .partial()) + refine aplicado depois.
+  it('atualiza parcialmente (200) — regressão do bug .partial()+.refine() no zod v4', async () => {
     const app = buildApp()
     app.register(proposalsRoute, { prefix: '/proposals' })
     await app.ready()
@@ -145,7 +142,7 @@ describe('PUT /proposals/:id', () => {
       update: jest.fn().mockReturnValue({ eq: jest.fn().mockReturnValue({ select: jest.fn().mockReturnValue({ single: jest.fn().mockResolvedValue({ data: { id }, error: null }) }) }) }),
     })
     const res = await app.inject({ method: 'PUT', url: `/proposals/${id}`, headers: { 'x-test-user': mgr }, payload: { description: 'Nova descrição' } })
-    expect(res.statusCode).toBe(500)
+    expect(res.statusCode).toBe(200)
   })
 
   it('employee recebe 403', async () => {

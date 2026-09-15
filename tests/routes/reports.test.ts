@@ -141,6 +141,9 @@ describe('POST /jobs/:id/report', () => {
         }),
       }
       if (table === 'jobs') return {
+        select: jest.fn().mockReturnValue({
+          eq: jest.fn().mockReturnValue({ single: jest.fn().mockResolvedValue({ data: { employee_id: 'emp-owner' }, error: null }) }),
+        }),
         update: jest.fn().mockReturnValue({ eq: jest.fn().mockResolvedValue({ error: null }) }),
       }
       return mockSupabase

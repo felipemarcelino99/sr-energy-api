@@ -111,13 +111,10 @@ describe('GET /contracts/:id', () => {
 
 describe('PUT /contracts/:id', () => {
   const id = '11111111-1111-1111-1111-111111111111'
-  // NOTA (achado pré-existente, fora do escopo deste sub-plano — não é regressão
-  // introduzida aqui): `contractBody.partial()` falha em runtime porque o schema
-  // usa `.refine()` (zod v4 não permite `.partial()` em objeto com refinement),
-  // então PUT /contracts/:id hoje sempre responde 500. Reportado no resumo final
-  // para o dono do módulo decidir se cria ticket; este teste apenas documenta o
-  // comportamento real observado, sem "consertar" lógica fora do checklist 1-4.
-  it('rota atualmente sempre falha com 500 devido a bug pré-existente (.partial() + .refine() no zod v4)', async () => {
+  // Fix: `contractBody` foi dividido em `contractBodyBase` (sem refine, aceita
+  // .partial()) + `contractBody`/`contractBodyPartial` com refine aplicado
+  // depois — zod v4 não permite `.partial()` em objeto com refinement.
+  it('atualiza parcialmente (200) — regressão do bug .partial()+.refine() no zod v4', async () => {
     const app = buildApp()
     app.register(contractsRoute, { prefix: '/contracts' })
     await app.ready()
@@ -125,7 +122,7 @@ describe('PUT /contracts/:id', () => {
       update: jest.fn().mockReturnValue({ eq: jest.fn().mockReturnValue({ select: jest.fn().mockReturnValue({ single: jest.fn().mockResolvedValue({ data: { id }, error: null }) }) }) }),
     })
     const res = await app.inject({ method: 'PUT', url: `/contracts/${id}`, headers: { 'x-test-user': mgr }, payload: { description: 'Nova descrição' } })
-    expect(res.statusCode).toBe(500)
+    expect(res.statusCode).toBe(200)
   })
 })
 

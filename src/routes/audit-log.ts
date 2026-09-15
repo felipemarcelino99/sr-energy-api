@@ -3,7 +3,10 @@ import { z } from 'zod'
 import { history } from '@/services/audit-log.service'
 import { isJobAssignedToEmployee } from '@/routes/jobs'
 
-const entityType = z.enum(['contract', 'job'])
+// 'proposal' incluído: proposals.ts grava proposal.accepted/rejected com esse
+// entityType (021_proposals_split.sql) — faltava aqui, tornando esses eventos
+// gravados porém inacessíveis via GET (achado da auditoria 2026-09-15).
+const entityType = z.enum(['contract', 'job', 'proposal'])
 
 const listQuery = z.object({
   entityType,

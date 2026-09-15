@@ -255,8 +255,10 @@ const jobs: FastifyPluginAsync = async (fastify) => {
     return data
   })
 
-  // GET /jobs/:id/checklist
-  fastify.get<{ Params: { id: string }; Querystring: { phase?: string } }>('/:id/checklist', { onRequest: [guard] }, async (req, reply) => {
+  // GET /jobs/:id/checklist — CRITICAL-07 (IDOR): mesma checagem de loadOwnedJob usada
+  // em GET/PUT/:id, faltava aqui (achado da auditoria 2026-09-15).
+  fastify.get<{ Params: { id: string }; Querystring: { phase?: string } }>('/:id/checklist', { onRequest: [guard] }, async (req: any, reply) => {
+    if (!(await loadOwnedJob(db, req, reply))) return
     let query = db
       .from('job_checklists')
       .select('*, tools(id, name, description)')
@@ -267,8 +269,9 @@ const jobs: FastifyPluginAsync = async (fastify) => {
     return data ?? []
   })
 
-  // PATCH /jobs/:id/checklist/:itemId
+  // PATCH /jobs/:id/checklist/:itemId — CRITICAL-07 (IDOR)
   fastify.patch<{ Params: { id: string; itemId: string } }>('/:id/checklist/:itemId', { onRequest: [guard] }, async (req: any, reply) => {
+    if (!(await loadOwnedJob(db, req, reply))) return
     const parsed = z.object({ checked: z.boolean() }).safeParse(req.body)
     if (!parsed.success) return reply.status(400).send({ error: parsed.error.flatten() })
     const update: any = {
@@ -286,8 +289,9 @@ const jobs: FastifyPluginAsync = async (fastify) => {
     return data
   })
 
-  // POST /jobs/:id/checklist/duplicate — duplica pre_work para pre_report
+  // POST /jobs/:id/checklist/duplicate — duplica pre_work para pre_report. CRITICAL-07 (IDOR)
   fastify.post<{ Params: { id: string } }>('/:id/checklist/duplicate', { onRequest: [guard] }, async (req: any, reply) => {
+    if (!(await loadOwnedJob(db, req, reply))) return
     // Verifica se já existe pre_report
     const { data: existing } = await db
       .from('job_checklists')

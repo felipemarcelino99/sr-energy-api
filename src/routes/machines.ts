@@ -32,7 +32,7 @@ const machines: FastifyPluginAsync = async (fastify) => {
     return data
   })
 
-  fastify.post('/', { onRequest: [guard] }, async (req, reply) => {
+  fastify.post('/', { onRequest: [guard, adminOrManager] }, async (req, reply) => {
     const parsed = machineBody.safeParse(req.body)
     if (!parsed.success) return reply.status(400).send({ error: parsed.error.flatten() })
     const { data, error } = await db.from('machines').insert(parsed.data).select().single()
@@ -40,7 +40,7 @@ const machines: FastifyPluginAsync = async (fastify) => {
     return reply.status(201).send(data)
   })
 
-  fastify.put<{ Params: { id: string } }>('/:id', { onRequest: [guard] }, async (req, reply) => {
+  fastify.put<{ Params: { id: string } }>('/:id', { onRequest: [guard, adminOrManager] }, async (req, reply) => {
     const parsed = machineBody.safeParse(req.body)
     if (!parsed.success) return reply.status(400).send({ error: parsed.error.flatten() })
     const { data, error } = await db.from('machines').update({ ...parsed.data, updated_at: new Date().toISOString() })
@@ -49,7 +49,7 @@ const machines: FastifyPluginAsync = async (fastify) => {
     return data
   })
 
-  fastify.delete<{ Params: { id: string } }>('/:id', { onRequest: [guard] }, async (req, reply) => {
+  fastify.delete<{ Params: { id: string } }>('/:id', { onRequest: [guard, adminOrManager] }, async (req, reply) => {
     const { error } = await db.from('machines').delete().eq('id', req.params.id)
     if (error) return reply.status(500).send({ error: error.message })
     return reply.status(204).send()

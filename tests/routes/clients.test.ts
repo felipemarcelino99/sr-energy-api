@@ -144,14 +144,38 @@ describe('DELETE /clients/:id', () => {
     app.register(clientsRoute, { prefix: '/clients' })
     await app.ready()
     const admin = JSON.stringify({ id: 'adm-1', role: 'admin', name: 'Admin', email: 'a@sr.com' })
-    mockSupabase.from.mockReturnValue({
-      delete: jest.fn().mockReturnValue({ eq: jest.fn().mockResolvedValue({ error: null }) }),
+    mockSupabase.from.mockImplementation((table: string) => {
+      if (table === 'contracts' || table === 'proposals') {
+        return { select: jest.fn().mockReturnValue({ eq: jest.fn().mockResolvedValue({ count: 0, error: null }) }) }
+      }
+      return { delete: jest.fn().mockReturnValue({ eq: jest.fn().mockResolvedValue({ error: null }) }) }
     })
     const res = await app.inject({
       method: 'DELETE', url: '/clients/11111111-1111-1111-1111-111111111111',
       headers: { 'x-test-user': admin },
     })
     expect(res.statusCode).toBe(204)
+  })
+
+  it('409 quando cliente tem contrato ou proposta vinculado', async () => {
+    const app = buildApp()
+    app.register(clientsRoute, { prefix: '/clients' })
+    await app.ready()
+    const admin = JSON.stringify({ id: 'adm-1', role: 'admin', name: 'Admin', email: 'a@sr.com' })
+    mockSupabase.from.mockImplementation((table: string) => {
+      if (table === 'contracts') {
+        return { select: jest.fn().mockReturnValue({ eq: jest.fn().mockResolvedValue({ count: 1, error: null }) }) }
+      }
+      if (table === 'proposals') {
+        return { select: jest.fn().mockReturnValue({ eq: jest.fn().mockResolvedValue({ count: 0, error: null }) }) }
+      }
+      return { delete: jest.fn().mockReturnValue({ eq: jest.fn().mockResolvedValue({ error: null }) }) }
+    })
+    const res = await app.inject({
+      method: 'DELETE', url: '/clients/11111111-1111-1111-1111-111111111111',
+      headers: { 'x-test-user': admin },
+    })
+    expect(res.statusCode).toBe(409)
   })
 
   it('manager recebe 403 (só admin pode deletar)', async () => {

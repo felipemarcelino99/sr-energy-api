@@ -7,18 +7,24 @@ import { record as recordAuditEvent } from '@/services/audit-log.service'
 // (ver supabase/migrations/021_proposals_split.sql). `number`/`status` nunca vêm
 // do body — `number` é gerado pelo banco (DEFAULT next_document_number()) e
 // `status` sempre nasce `pending`.
-const proposalBody = z.object({
+// zod v4 não permite .partial() em schema com .refine() — base separada do refine
+const proposalBodyBase = z.object({
   client_id: z.string().uuid('Cliente é obrigatório'),
   description: z.string().min(1).max(2000),
   start_date: z.string().min(1),
   end_date: z.string().min(1),
   contract_type: z.enum(['service', 'rental']).optional(),
   contract_value: z.number().min(0).optional(),
-  recurring: z.boolean().optional(),
+  recurring: z.boolean().default(false),
   file_url: z.string().optional(),
-}).refine(d => new Date(d.end_date) >= new Date(d.start_date), {
+})
+const proposalBody = proposalBodyBase.refine(d => new Date(d.end_date) >= new Date(d.start_date), {
   message: 'end_date must be after start_date', path: ['end_date'],
 })
+const proposalBodyPartial = proposalBodyBase.partial().refine(
+  d => !d.start_date || !d.end_date || new Date(d.end_date) >= new Date(d.start_date),
+  { message: 'end_date must be after start_date', path: ['end_date'] },
+)
 
 // HIGH-05: schema de validação UUID para path params
 const uuidParams = {
@@ -97,7 +103,7 @@ const proposals: FastifyPluginAsync = async (fastify) => {
     '/:id',
     { onRequest: [guard, adminOrManager], schema: { params: uuidParams } },
     async (req, reply) => {
-      const parsed = proposalBody.partial().safeParse(req.body)
+      const parsed = proposalBodyPartial.safeParse(req.body)
       if (!parsed.success) return reply.status(400).send({ error: parsed.error.flatten() })
       const { data, error } = await db.from('proposals')
         .update({ ...parsed.data, updated_at: new Date().toISOString() })
