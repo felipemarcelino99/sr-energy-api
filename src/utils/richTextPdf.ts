@@ -56,9 +56,50 @@ function parseInline(html: string): TextRun[] {
   return runs.filter((r) => r.text.length > 0)
 }
 
+// Bug A2: o TipTap pode envolver o texto de um <li> em <p>...</p> (ex:
+// `<li><p>a</p></li>`), e `parseInline` não reconhece a tag `p` — ela apareceria
+// literalmente como texto no PDF. Normaliza removendo os wrappers <p>/</p> do
+// conteúdo do item antes de passar pra `parseInline`; se houver múltiplos <p>
+// dentro do mesmo <li>, junta o conteúdo com quebra de linha entre eles.
+function stripListItemParagraphs(html: string): string {
+  const pRe = /<p>([\s\S]*?)<\/p>/gi
+  const parts: string[] = []
+  let found = false
+  let pm: RegExpExecArray | null
+  while ((pm = pRe.exec(html))) {
+    found = true
+    parts.push(pm[1])
+  }
+  if (found) return parts.join('\n')
+  // Sem wrapper <p> — remove tags <p>/</p> soltas por segurança (malformado) e segue.
+  return html.replace(/<\/?p>/gi, '')
+}
+
+// Bug A1: relatórios legados podem ser texto puro, sem nenhuma tag de bloco
+// reconhecida (h1-3/p/ul/ol). Nesse caso o `blockRe` de `parseReportHtml` não
+// bate em nada e o conteúdo inteiro desaparecia do PDF. Trata o texto puro como
+// parágrafos: linhas em branco (`\n\n`) separam parágrafos, e dentro de cada
+// parágrafo uma quebra de linha simples (`\n`) vira `<br>` (mesmo mecanismo que
+// `parseInline` já usa pra quebras de linha), reaproveitando `parseInline` pra
+// decodificar entidades HTML residuais (ex: `&amp;`) que o texto legado possa ter.
+function parsePlainText(text: string): ReportBlock[] {
+  const paragraphs = text.split(/\n\s*\n/)
+  const blocks: ReportBlock[] = []
+  for (const para of paragraphs) {
+    const trimmed = para.trim()
+    if (!trimmed) continue
+    const withBreaks = trimmed.replace(/\n/g, '<br>')
+    blocks.push({ type: 'paragraph', runs: parseInline(withBreaks) })
+  }
+  return blocks
+}
+
 /** Converte o HTML gerado pelo RichTextEditor (TipTap) numa lista de blocos
  * estruturados, preservando negrito/itálico/sublinhado/headings/listas. */
 export function parseReportHtml(html: string): ReportBlock[] {
+  const hasBlockTag = /<(h[1-3]|p|ul|ol)>/i.test(html)
+  if (!hasBlockTag) return parsePlainText(html)
+
   const blocks: ReportBlock[] = []
   const blockRe = /<(h[1-3]|p|ul|ol)>([\s\S]*?)<\/\1>/gi
   let m: RegExpExecArray | null
@@ -69,7 +110,7 @@ export function parseReportHtml(html: string): ReportBlock[] {
       const items: TextRun[][] = []
       const liRe = /<li>([\s\S]*?)<\/li>/gi
       let lm: RegExpExecArray | null
-      while ((lm = liRe.exec(inner))) items.push(parseInline(lm[1]))
+      while ((lm = liRe.exec(inner))) items.push(parseInline(stripListItemParagraphs(lm[1])))
       blocks.push({ type: 'list', ordered: tag === 'ol', items })
     } else if (tag.startsWith('h')) {
       blocks.push({ type: 'heading', level: Number(tag[1]) as 1 | 2 | 3, runs: parseInline(inner) })
@@ -89,12 +130,56 @@ function fontFor(r: TextRun): string {
   return 'Helvetica'
 }
 
-function renderRuns(doc: PDFKit.PDFDocument, runs: TextRun[]): void {
-  runs.forEach((r, i) => {
+// Bug (achado na verificação real do A1): um run `<br>` (`text: '\n'`) emitido
+// como `doc.text('\n', { continued: true })` no meio de uma cadeia `continued`
+// não produz quebra de linha no pdfkit — o texto seguinte cola sem espaço no
+// anterior (ex: "cliente.Sem"). E fechar a cadeia com `doc.text('', { continued:
+// false })` (string vazia) também não avança a linha corretamente — a altura
+// calculada pro trecho vazio é zero e a próxima chamada sobrepõe a anterior.
+// pdfkit só quebra linha de forma confiável quando a cadeia `continued` fecha
+// com conteúdo real. Por isso agrupamos os runs em "linhas" nos marcadores
+// `\n` e renderizamos cada linha como sua própria cadeia `continued`,
+// terminando sempre no último run com texto de fato.
+function renderRunLine(doc: PDFKit.PDFDocument, lineRuns: TextRun[]): void {
+  lineRuns.forEach((r, i) => {
     doc.font(fontFor(r))
-    const isLast = i === runs.length - 1
+    const isLast = i === lineRuns.length - 1
     doc.text(r.text, { continued: !isLast, underline: Boolean(r.underline) })
   })
+}
+
+function renderRuns(doc: PDFKit.PDFDocument, runs: TextRun[]): void {
+  if (runs.length === 0) return
+
+  const lines: TextRun[][] = [[]]
+  for (const r of runs) {
+    if (r.text === '\n') {
+      lines.push([])
+    } else {
+      lines[lines.length - 1].push(r)
+    }
+  }
+
+  for (const lineRuns of lines) {
+    if (lineRuns.length === 0) continue
+    renderRunLine(doc, lineRuns)
+  }
+}
+
+// Bug A2: item de lista vazio (ex: `<li></li>` ou `<li><p></p></li>`) chega
+// aqui com `runs` vazio. O chamador (lista em `renderReportHtml`) precisa de um
+// único ponto que decide se abre uma cadeia `continued` (marcador + texto) ou
+// fecha a linha já no marcador — nunca abrir com `continued: true` e fechar
+// depois com uma chamada de conteúdo vazio (mesmo bug de altura zero do
+// `renderRunLine`/`\n` acima: a linha do marcador some ou sobrepõe a próxima).
+function renderListItem(doc: PDFKit.PDFDocument, marker: string, runs: TextRun[]): void {
+  doc.font('Helvetica')
+  if (runs.length === 0) {
+    doc.text(marker, { continued: false })
+    return
+  }
+  doc.text(marker, { continued: true })
+  renderRuns(doc, runs)
 }
 
 /** Renderiza o HTML do TipTap no doc pdfkit corrente, preservando
@@ -110,8 +195,7 @@ export function renderReportHtml(doc: PDFKit.PDFDocument, html: string, bodySize
     } else if (block.type === 'list') {
       doc.fontSize(bodySize)
       block.items.forEach((runs, i) => {
-        doc.font('Helvetica').text(block.ordered ? `${i + 1}. ` : '•  ', { continued: true })
-        renderRuns(doc, runs)
+        renderListItem(doc, block.ordered ? `${i + 1}. ` : '•  ', runs)
       })
       doc.moveDown(0.3)
     } else {
