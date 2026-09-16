@@ -122,6 +122,89 @@ describe('POST /jobs/:id/report', () => {
     expect(res.statusCode).toBe(404)
   })
 
+  // Bug A4: jobs.employee_id (legado) nulo não deveria bloquear o relatório se
+  // o job tem colaborador(es) vinculado(s) via job_employees.
+  it('admin sem registro de employee: usa job_employees quando jobs.employee_id é nulo', async () => {
+    const app = buildApp()
+    app.register(reportsRoute)
+    await app.ready()
+
+    mockSupabase.from.mockImplementation((table: string) => {
+      if (table === 'employees') return {
+        select: jest.fn().mockReturnValue({
+          eq: jest.fn().mockReturnValue({ single: jest.fn().mockResolvedValue({ data: null, error: null }) }),
+        }),
+      }
+      if (table === 'jobs') return {
+        select: jest.fn().mockReturnValue({
+          eq: jest.fn().mockReturnValue({ single: jest.fn().mockResolvedValue({ data: { employee_id: null }, error: null }) }),
+        }),
+        update: jest.fn().mockReturnValue({ eq: jest.fn().mockResolvedValue({ error: null }) }),
+      }
+      if (table === 'job_employees') return {
+        select: jest.fn().mockReturnValue({
+          eq: jest.fn().mockReturnValue({
+            order: jest.fn().mockReturnValue({
+              limit: jest.fn().mockResolvedValue({ data: [{ employee_id: 'emp-linked-1' }], error: null }),
+            }),
+          }),
+        }),
+      }
+      if (table === 'job_reports') return {
+        insert: jest.fn().mockImplementation((row: any) => ({
+          select: jest.fn().mockReturnValue({
+            single: jest.fn().mockResolvedValue({ data: { id: 'rpt-3', job_id: 'j-1', employee_id: row.employee_id }, error: null }),
+          }),
+        })),
+      }
+      return mockSupabase
+    })
+
+    const res = await app.inject({
+      method: 'POST', url: '/jobs/j-1/report',
+      headers: { 'x-test-user': admin, 'content-type': 'application/json' },
+      payload: { content: '<p>Relatório via job_employees</p>' },
+    })
+    expect(res.statusCode).toBe(201)
+    expect(res.json().employee_id).toBe('emp-linked-1')
+  })
+
+  it('Bug A4: 422 quando job não tem employee_id nem job_employees vinculado', async () => {
+    const app = buildApp()
+    app.register(reportsRoute)
+    await app.ready()
+
+    mockSupabase.from.mockImplementation((table: string) => {
+      if (table === 'employees') return {
+        select: jest.fn().mockReturnValue({
+          eq: jest.fn().mockReturnValue({ single: jest.fn().mockResolvedValue({ data: null, error: null }) }),
+        }),
+      }
+      if (table === 'jobs') return {
+        select: jest.fn().mockReturnValue({
+          eq: jest.fn().mockReturnValue({ single: jest.fn().mockResolvedValue({ data: { employee_id: null }, error: null }) }),
+        }),
+      }
+      if (table === 'job_employees') return {
+        select: jest.fn().mockReturnValue({
+          eq: jest.fn().mockReturnValue({
+            order: jest.fn().mockReturnValue({
+              limit: jest.fn().mockResolvedValue({ data: [], error: null }),
+            }),
+          }),
+        }),
+      }
+      return mockSupabase
+    })
+
+    const res = await app.inject({
+      method: 'POST', url: '/jobs/j-1/report',
+      headers: { 'x-test-user': admin, 'content-type': 'application/json' },
+      payload: { content: '<p>Sem responsável</p>' },
+    })
+    expect(res.statusCode).toBe(422)
+  })
+
   it('admin cria relatório sem checagem de ownership (bypass)', async () => {
     const app = buildApp()
     app.register(reportsRoute)

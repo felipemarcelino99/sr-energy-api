@@ -68,6 +68,18 @@ const reports: FastifyPluginAsync = async (fastify) => {
     if (!employeeId) {
       const { data: job } = await db.from('jobs').select('employee_id').eq('id', req.params.id).single()
       employeeId = job?.employee_id ?? null
+      // Bug A4: jobs.employee_id (legado) pode estar nulo mesmo com colaborador(es)
+      // vinculado(s) via job_employees (many-to-many, ver supabase/migrations/
+      // 017_jobs_pc_os_extension.sql). Antes de dar 422, cai pro mais antigo
+      // (created_at asc) vinculado ao job — ordem determinística.
+      if (!employeeId) {
+        const { data: jobEmployees } = await db.from('job_employees')
+          .select('employee_id')
+          .eq('job_id', req.params.id)
+          .order('created_at', { ascending: true })
+          .limit(1)
+        employeeId = jobEmployees?.[0]?.employee_id ?? null
+      }
     }
     if (!employeeId) return reply.status(422).send({ error: 'Job sem funcionário responsável atribuído' })
     const { data, error } = await db.from('job_reports')
