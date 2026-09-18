@@ -1,14 +1,24 @@
 import type { FastifyPluginAsync } from 'fastify'
 import { z } from 'zod'
 import { requireRoles } from '@/plugins/authorize'
+import { isValidCPF } from '@/utils/cpf'
+import { uploadFile, getSignedUrl } from '@/services/storage.service'
+import { detectMimeFromBuffer } from '@/utils/file-signature'
+
+const COLOR_REGEX = /^#[0-9a-fA-F]{6}$/
 
 // HIGH-06: whitelist explícita de campos — exclui campos internos (user_id, google_refresh_token)
+// Sub-plano 02: `cnpj` → `cpf` (documento pessoal — funcionário é PF, ver
+// supabase/migrations/032_employee_cpf_cor_foto.sql), dígitos verificadores
+// checados em utils/cpf.ts. `color`: identificação visual no calendário de
+// OS (GET /jobs/calendar).
 const employeeBody = z.object({
   name: z.string().min(2).max(100),
   email: z.string().email(),
   phone: z.string().min(8).max(20),
   role: z.enum(['employee', 'manager']),
-  cnpj: z.string().optional(),
+  cpf: z.string().refine(isValidCPF, 'CPF inválido').optional(),
+  color: z.string().regex(COLOR_REGEX, 'Cor inválida — use o formato #RRGGBB').optional(),
   salary: z.coerce.number().positive(),
   hired_at: z.string().min(1),
 })
@@ -31,14 +41,32 @@ const uuidParams = {
   required: ['id'],
 } as const
 
-// MED-04: colunas seguras — exclui google_refresh_token
-const SAFE_COLUMNS = 'id, name, email, phone, role, cnpj, salary, hired_at, created_at, updated_at, user_id'
+// MED-04: colunas seguras — exclui google_refresh_token. `photo_path` é
+// interno (chave no bucket, não a URL) — nunca sai da rota crua, sempre
+// convertido em `photo_url` assinado por `attachPhotoUrl` antes de responder.
+const SAFE_COLUMNS = 'id, name, email, phone, role, cpf, color, photo_path, salary, hired_at, created_at, updated_at, user_id'
 // HIGH-04: employee não pode ver salário de outros colaboradores (só dado técnico é
 // compartilhado; financeiro/RH é restrito a admin/manager).
-const SAFE_COLUMNS_EMPLOYEE = 'id, name, email, phone, role, cnpj, hired_at, created_at, updated_at, user_id'
+const SAFE_COLUMNS_EMPLOYEE = 'id, name, email, phone, role, cpf, color, photo_path, hired_at, created_at, updated_at, user_id'
 
 function columnsFor(role: string): string {
   return role === 'employee' ? SAFE_COLUMNS_EMPLOYEE : SAFE_COLUMNS
+}
+
+// Sub-plano 02: `photo_url` é gerado na leitura (TTL curto, mesmo padrão dos
+// demais buckets privados — ver storage.service.ts), nunca persistido. Falha
+// ao assinar não deve derrubar a resposta (a foto só some, o resto do
+// cadastro continua acessível).
+async function attachPhotoUrl(db: any, row: any): Promise<any> {
+  if (!row) return row
+  const { photo_path, ...rest } = row
+  if (!photo_path) return { ...rest, photo_url: null }
+  try {
+    const photo_url = await getSignedUrl(db, 'employee-photos', photo_path)
+    return { ...rest, photo_url }
+  } catch {
+    return { ...rest, photo_url: null }
+  }
 }
 
 const employees: FastifyPluginAsync = async (fastify) => {
@@ -51,7 +79,7 @@ const employees: FastifyPluginAsync = async (fastify) => {
     // MED-04/HIGH-04: select explícito, sem google_refresh_token; sem salary para employee
     const { data, error } = await db.from('employees').select(columnsFor(req.user.role)).order('name')
     if (error) return reply.status(500).send({ error: error.message })
-    return data
+    return Promise.all((data ?? []).map((row: any) => attachPhotoUrl(db, row)))
   })
 
   // GET /employees/:id
@@ -61,7 +89,7 @@ const employees: FastifyPluginAsync = async (fastify) => {
     async (req: any, reply) => {
       const { data, error } = await db.from('employees').select(columnsFor(req.user.role)).eq('id', req.params.id).single()
       if (error || !data) return reply.status(404).send({ error: 'Not found' })
-      return data
+      return attachPhotoUrl(db, data)
     },
   )
 
@@ -110,7 +138,52 @@ const employees: FastifyPluginAsync = async (fastify) => {
         ...parsed.data, updated_at: new Date().toISOString(),
       }).eq('id', req.params.id).select(SAFE_COLUMNS).single()
       if (error || !data) return reply.status(404).send({ error: 'Not found' })
-      return data
+      return attachPhotoUrl(db, data)
+    },
+  )
+
+  // POST /employees/:id/photo — multipart, JPEG/PNG via magic bytes, ≤5MB.
+  // O próprio employee só envia a própria foto (confere via employees.user_id
+  // do JWT); admin/manager enviam a de qualquer um. Path fixo
+  // `employees/{id}.{ext}` com upsert — troca a foto anterior sem acumular
+  // lixo no bucket.
+  // Limite de negócio (5MB) — bem abaixo do `limits.fileSize` de 50MB do
+  // registro global do plugin multipart (src/app.ts), que é quem de fato
+  // evita 413 pra fotos nesse tamanho. Checado abaixo, depois de ler o
+  // buffer inteiro (mesmo padrão do resto do arquivo — sem streaming parcial).
+  const MAX_PHOTO_SIZE_BYTES = 5 * 1024 * 1024
+  fastify.post<{ Params: { id: string } }>(
+    '/:id/photo',
+    { onRequest: [guard], schema: { params: uuidParams } },
+    async (req: any, reply) => {
+      const isAdminOrManager = ['admin', 'manager'].includes(req.user.role)
+      if (!isAdminOrManager) {
+        const { data: emp } = await db.from('employees').select('id').eq('user_id', req.user.id).single()
+        if (!emp || emp.id !== req.params.id) {
+          return reply.status(403).send({ error: 'Só é possível enviar a própria foto' })
+        }
+      }
+
+      const file = await req.file()
+      if (!file) return reply.status(400).send({ error: 'Arquivo não enviado' })
+      const buffer = await file.toBuffer()
+      if (buffer.length > MAX_PHOTO_SIZE_BYTES) {
+        return reply.status(400).send({ error: 'Arquivo maior que 5MB' })
+      }
+
+      const detectedMime = detectMimeFromBuffer(buffer)
+      if (detectedMime !== 'image/jpeg' && detectedMime !== 'image/png') {
+        return reply.status(400).send({ error: 'Tipo de arquivo não permitido. Envie JPEG ou PNG.' })
+      }
+      const ext = detectedMime === 'image/png' ? 'png' : 'jpg'
+      const photoPath = `employees/${req.params.id}.${ext}`
+
+      await uploadFile(fastify.supabase, 'employee-photos', photoPath, buffer, detectedMime)
+      const { data, error } = await db.from('employees')
+        .update({ photo_path: photoPath, updated_at: new Date().toISOString() })
+        .eq('id', req.params.id).select(columnsFor(req.user.role)).single()
+      if (error || !data) return reply.status(404).send({ error: 'Not found' })
+      return attachPhotoUrl(db, data)
     },
   )
 

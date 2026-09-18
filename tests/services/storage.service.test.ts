@@ -40,6 +40,12 @@ describe('uploadFile', () => {
     expect(url).toBe('https://signed.example/ev.jpg')
   })
 
+  it('Sub-plano 02: usa URL assinada para employee-photos', async () => {
+    const supabase = makeSupabaseMock({ signedUrl: 'https://signed.example/emp.jpg' })
+    const url = await uploadFile(supabase, 'employee-photos', 'employees/emp-1.jpg', Buffer.from('x'), 'image/jpeg')
+    expect(url).toBe('https://signed.example/emp.jpg')
+  })
+
   it('usa URL pública para bucket não sensível (machine-manuals)', async () => {
     const supabase = makeSupabaseMock({ publicUrl: 'https://public.example/manual.pdf' })
     const url = await uploadFile(supabase, 'machine-manuals', 'm-1.pdf', Buffer.from('x'), 'application/pdf')

@@ -1,6 +1,16 @@
 export type Role = 'admin' | 'manager' | 'employee'
-export type JobType = 'maintenance' | 'implementation'
-export type JobStatus = 'scheduled' | 'in_progress' | 'completed' | 'cancelled'
+// Sub-plano 01 (épico ajustes-cliente-2026-09), item 1: 10 tipos de serviço
+// novos, substituindo 'maintenance'/'implementation' (dados legados viram
+// NULL, ver supabase/migrations/030_pc_os_vinculo_direto.sql). Mantido em
+// sincronia manual com o enum zod em src/routes/jobs.ts.
+export type JobType =
+  | 'pre_commissioning' | 'commissioning' | 'pre_taf' | 'taf' | 'technical_visit'
+  | 'field_survey' | 'studies' | 'bench_tests' | 'energization_support' | 'development'
+// 'pending': status inicial da OS esqueleto criada por `accept_proposal`
+// (supabase/migrations/030_pc_os_vinculo_direto.sql) — já existia como valor
+// aceito pelo CHECK constraint do banco (012_missing_columns.sql) mas faltava
+// aqui.
+export type JobStatus = 'pending' | 'scheduled' | 'in_progress' | 'completed' | 'cancelled'
 export type TransactionType = 'credit' | 'debit'
 export type EvidenceType = 'image' | 'pdf' | 'video' | 'audio'
 
@@ -13,9 +23,17 @@ export interface JwtPayload {
   exp: number
 }
 
+// Sub-plano 02 (épico ajustes-cliente-2026-09): `cnpj` (documento de empresa)
+// vira `cpf` (documento pessoal — funcionário é PF, ver
+// supabase/migrations/032_employee_cpf_cor_foto.sql). `color`: identificação
+// visual no calendário de OS (antes calculada no front por hash do id, com
+// colisões). `photo_path`: chave no bucket privado `employee-photos` — nunca
+// a URL (expira, ver storage.service.ts); `photo_url` é computado na leitura
+// (src/routes/employees.ts) e não existe como coluna.
 export interface Employee {
   id: string; user_id: string | null; name: string; email: string
-  phone: string; role: 'employee' | 'manager'; cnpj?: string
+  phone: string; role: 'employee' | 'manager'; cpf?: string; color?: string
+  photo_path?: string
   salary: number; hired_at: string; created_at: string; updated_at: string
 }
 

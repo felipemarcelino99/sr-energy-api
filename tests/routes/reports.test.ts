@@ -19,16 +19,37 @@ const admin = JSON.stringify({ id: 'admin-1', role: 'admin', name: 'Admin', emai
 
 beforeEach(() => jest.clearAllMocks())
 
+// Sub-plano 02: GET /jobs/:id/report passa a checar ownership — helper monta
+// o mock de 'employees'/'jobs' (dono direto, sem precisar de job_employees:
+// isJobMember curto-circuita quando legacyEmployeeId === employeeId) usado
+// pelas duas branches de GET abaixo.
+function mockOwnedJobForGet(jobStatus: string | undefined, reportResult: { data: any; error: any }) {
+  mockSupabase.from.mockImplementation((table: string) => {
+    if (table === 'employees') return {
+      select: jest.fn().mockReturnValue({
+        eq: jest.fn().mockReturnValue({ single: jest.fn().mockResolvedValue({ data: { id: 'emp-db-1' }, error: null }) }),
+      }),
+    }
+    if (table === 'jobs') return {
+      select: jest.fn().mockReturnValue({
+        eq: jest.fn().mockReturnValue({ single: jest.fn().mockResolvedValue({ data: { id: 'j-1', status: jobStatus, employee_id: 'emp-db-1' }, error: null }) }),
+      }),
+    }
+    if (table === 'job_reports') return {
+      select: jest.fn().mockReturnValue({
+        eq: jest.fn().mockReturnValue({ single: jest.fn().mockResolvedValue(reportResult) }),
+      }),
+    }
+    return mockSupabase
+  })
+}
+
 describe('GET /jobs/:id/report', () => {
   it('retorna relatório do job', async () => {
     const app = buildApp()
     app.register(reportsRoute)
     await app.ready()
-    mockSupabase.from.mockReturnValue({
-      select: jest.fn().mockReturnValue({
-        eq: jest.fn().mockReturnValue({ single: jest.fn().mockResolvedValue({ data: { id: 'rpt-1' }, error: null }) }),
-      }),
-    })
+    mockOwnedJobForGet('in_progress', { data: { id: 'rpt-1' }, error: null })
     const res = await app.inject({ method: 'GET', url: '/jobs/j-1/report', headers: { 'x-test-user': emp } })
     expect(res.statusCode).toBe(200)
   })
@@ -37,12 +58,38 @@ describe('GET /jobs/:id/report', () => {
     const app = buildApp()
     app.register(reportsRoute)
     await app.ready()
-    mockSupabase.from.mockReturnValue({
-      select: jest.fn().mockReturnValue({
-        eq: jest.fn().mockReturnValue({ single: jest.fn().mockResolvedValue({ data: null, error: { message: 'nope' } }) }),
-      }),
-    })
+    mockOwnedJobForGet('in_progress', { data: null, error: { message: 'nope' } })
     const res = await app.inject({ method: 'GET', url: '/jobs/j-1/report', headers: { 'x-test-user': emp } })
+    expect(res.statusCode).toBe(404)
+  })
+
+  // Sub-plano 02, item 5: antes qualquer usuário autenticado lia o relatório
+  // de qualquer OS, bastando saber o id — não havia checagem de ownership.
+  it('CRITICAL-02 (IDOR): employee recebe 404 ao ler relatório de job alheio', async () => {
+    const app = buildApp()
+    app.register(reportsRoute)
+    await app.ready()
+    mockSupabase.from.mockImplementation((table: string) => {
+      if (table === 'employees') return {
+        select: jest.fn().mockReturnValue({
+          eq: jest.fn().mockReturnValue({ single: jest.fn().mockResolvedValue({ data: { id: 'emp-db-1' }, error: null }) }),
+        }),
+      }
+      if (table === 'jobs') return {
+        select: jest.fn().mockReturnValue({
+          eq: jest.fn().mockReturnValue({ single: jest.fn().mockResolvedValue({ data: { id: 'j-9', status: 'in_progress', employee_id: 'emp-outro' }, error: null }) }),
+        }),
+      }
+      if (table === 'job_employees') return {
+        select: jest.fn().mockReturnValue({
+          eq: jest.fn().mockReturnValue({
+            eq: jest.fn().mockReturnValue({ maybeSingle: jest.fn().mockResolvedValue({ data: null, error: null }) }),
+          }),
+        }),
+      }
+      return mockSupabase
+    })
+    const res = await app.inject({ method: 'GET', url: '/jobs/j-9/report', headers: { 'x-test-user': emp } })
     expect(res.statusCode).toBe(404)
   })
 })
@@ -65,7 +112,8 @@ describe('POST /jobs/:id/report', () => {
       if (table === 'jobs') return {
         select: jest.fn().mockReturnValue({
           eq: jest.fn().mockReturnValue({
-            single: jest.fn().mockResolvedValue({ data: { id: 'j-1', employee_id: 'emp-db-1' }, error: null }),
+            // Sub-plano 02: POST só aceita relatório com a OS em in_progress.
+            single: jest.fn().mockResolvedValue({ data: { id: 'j-1', status: 'in_progress', employee_id: 'emp-db-1' }, error: null }),
           }),
         }),
         update: jest.fn().mockReturnValue({
@@ -91,6 +139,32 @@ describe('POST /jobs/:id/report', () => {
     expect(res.json().id).toBe('rpt-1')
   })
 
+  // Sub-plano 02, item 5: OS fora de in_progress não aceita relatório.
+  it('409 quando a OS não está em andamento', async () => {
+    const app = buildApp()
+    app.register(reportsRoute)
+    await app.ready()
+    mockSupabase.from.mockImplementation((table: string) => {
+      if (table === 'employees') return {
+        select: jest.fn().mockReturnValue({
+          eq: jest.fn().mockReturnValue({ single: jest.fn().mockResolvedValue({ data: { id: 'emp-db-1' }, error: null }) }),
+        }),
+      }
+      if (table === 'jobs') return {
+        select: jest.fn().mockReturnValue({
+          eq: jest.fn().mockReturnValue({ single: jest.fn().mockResolvedValue({ data: { id: 'j-1', status: 'scheduled', employee_id: 'emp-db-1' }, error: null }) }),
+        }),
+      }
+      return mockSupabase
+    })
+    const res = await app.inject({
+      method: 'POST', url: '/jobs/j-1/report',
+      headers: { 'x-test-user': emp, 'content-type': 'application/json' },
+      payload: { content: '<p>Relatório precoce</p>' },
+    })
+    expect(res.statusCode).toBe(409)
+  })
+
   it('CRITICAL-02 (IDOR): employee recebe 404 ao criar relatório de job alheio', async () => {
     const app = buildApp()
     app.register(reportsRoute)
@@ -107,7 +181,14 @@ describe('POST /jobs/:id/report', () => {
       if (table === 'jobs') return {
         select: jest.fn().mockReturnValue({
           eq: jest.fn().mockReturnValue({
-            single: jest.fn().mockResolvedValue({ data: { id: 'j-9', employee_id: 'emp-outro' }, error: null }),
+            single: jest.fn().mockResolvedValue({ data: { id: 'j-9', status: 'in_progress', employee_id: 'emp-outro' }, error: null }),
+          }),
+        }),
+      }
+      if (table === 'job_employees') return {
+        select: jest.fn().mockReturnValue({
+          eq: jest.fn().mockReturnValue({
+            eq: jest.fn().mockReturnValue({ maybeSingle: jest.fn().mockResolvedValue({ data: null, error: null }) }),
           }),
         }),
       }
@@ -120,6 +201,50 @@ describe('POST /jobs/:id/report', () => {
       payload: { content: '<p>Relatório forjado</p>' },
     })
     expect(res.statusCode).toBe(404)
+  })
+
+  // Colaborador vinculado só via job_employees (sem employee_id legado) —
+  // sub-plano 02, item 6/8: isJobMember cobre essa fonte também.
+  it('colaborador só presente em job_employees consegue registrar relatório', async () => {
+    const app = buildApp()
+    app.register(reportsRoute)
+    await app.ready()
+
+    mockSupabase.from.mockImplementation((table: string) => {
+      if (table === 'employees') return {
+        select: jest.fn().mockReturnValue({
+          eq: jest.fn().mockReturnValue({ single: jest.fn().mockResolvedValue({ data: { id: 'emp-linked-1' }, error: null }) }),
+        }),
+      }
+      if (table === 'jobs') return {
+        select: jest.fn().mockReturnValue({
+          eq: jest.fn().mockReturnValue({ single: jest.fn().mockResolvedValue({ data: { id: 'j-os-1', status: 'in_progress', employee_id: null }, error: null }) }),
+        }),
+        update: jest.fn().mockReturnValue({ eq: jest.fn().mockResolvedValue({ error: null }) }),
+      }
+      if (table === 'job_employees') return {
+        select: jest.fn().mockReturnValue({
+          eq: jest.fn().mockReturnValue({
+            eq: jest.fn().mockReturnValue({ maybeSingle: jest.fn().mockResolvedValue({ data: { job_id: 'j-os-1' }, error: null }) }),
+          }),
+        }),
+      }
+      if (table === 'job_reports') return {
+        insert: jest.fn().mockReturnValue({
+          select: jest.fn().mockReturnValue({
+            single: jest.fn().mockResolvedValue({ data: { id: 'rpt-4', job_id: 'j-os-1', employee_id: 'emp-linked-1' }, error: null }),
+          }),
+        }),
+      }
+      return mockSupabase
+    })
+
+    const res = await app.inject({
+      method: 'POST', url: '/jobs/j-os-1/report',
+      headers: { 'x-test-user': emp, 'content-type': 'application/json' },
+      payload: { content: '<p>Relatório via job_employees</p>' },
+    })
+    expect(res.statusCode).toBe(201)
   })
 
   // Bug A4: jobs.employee_id (legado) nulo não deveria bloquear o relatório se
@@ -137,7 +262,7 @@ describe('POST /jobs/:id/report', () => {
       }
       if (table === 'jobs') return {
         select: jest.fn().mockReturnValue({
-          eq: jest.fn().mockReturnValue({ single: jest.fn().mockResolvedValue({ data: { employee_id: null }, error: null }) }),
+          eq: jest.fn().mockReturnValue({ single: jest.fn().mockResolvedValue({ data: { status: 'in_progress', employee_id: null }, error: null }) }),
         }),
         update: jest.fn().mockReturnValue({ eq: jest.fn().mockResolvedValue({ error: null }) }),
       }
@@ -182,7 +307,7 @@ describe('POST /jobs/:id/report', () => {
       }
       if (table === 'jobs') return {
         select: jest.fn().mockReturnValue({
-          eq: jest.fn().mockReturnValue({ single: jest.fn().mockResolvedValue({ data: { employee_id: null }, error: null }) }),
+          eq: jest.fn().mockReturnValue({ single: jest.fn().mockResolvedValue({ data: { status: 'in_progress', employee_id: null }, error: null }) }),
         }),
       }
       if (table === 'job_employees') return {
@@ -225,7 +350,7 @@ describe('POST /jobs/:id/report', () => {
       }
       if (table === 'jobs') return {
         select: jest.fn().mockReturnValue({
-          eq: jest.fn().mockReturnValue({ single: jest.fn().mockResolvedValue({ data: { employee_id: 'emp-owner' }, error: null }) }),
+          eq: jest.fn().mockReturnValue({ single: jest.fn().mockResolvedValue({ data: { status: 'in_progress', employee_id: 'emp-owner' }, error: null }) }),
         }),
         update: jest.fn().mockReturnValue({ eq: jest.fn().mockResolvedValue({ error: null }) }),
       }
@@ -282,6 +407,26 @@ describe('POST /jobs/:id/report — assertJobOwnership branches', () => {
     const res = await app.inject({
       method: 'POST', url: '/jobs/j-999/report',
       headers: { 'x-test-user': emp, 'content-type': 'application/json' },
+      payload: { content: '<p>x</p>' },
+    })
+    expect(res.statusCode).toBe(404)
+  })
+
+  it('retorna 404 quando job não existe (branch admin/manager de assertJobOwnership)', async () => {
+    const app = buildApp()
+    app.register(reportsRoute)
+    await app.ready()
+    mockSupabase.from.mockImplementation((table: string) => {
+      if (table === 'jobs') return {
+        select: jest.fn().mockReturnValue({
+          eq: jest.fn().mockReturnValue({ single: jest.fn().mockResolvedValue({ data: null, error: { message: 'not found' } }) }),
+        }),
+      }
+      return mockSupabase
+    })
+    const res = await app.inject({
+      method: 'POST', url: '/jobs/j-999/report',
+      headers: { 'x-test-user': admin, 'content-type': 'application/json' },
       payload: { content: '<p>x</p>' },
     })
     expect(res.statusCode).toBe(404)
@@ -383,7 +528,14 @@ describe('PUT /jobs/:id/report', () => {
       if (table === 'jobs') return {
         select: jest.fn().mockReturnValue({
           eq: jest.fn().mockReturnValue({
-            single: jest.fn().mockResolvedValue({ data: { id: 'j-9', employee_id: 'emp-outro' }, error: null }),
+            single: jest.fn().mockResolvedValue({ data: { id: 'j-9', status: 'in_progress', employee_id: 'emp-outro' }, error: null }),
+          }),
+        }),
+      }
+      if (table === 'job_employees') return {
+        select: jest.fn().mockReturnValue({
+          eq: jest.fn().mockReturnValue({
+            eq: jest.fn().mockReturnValue({ maybeSingle: jest.fn().mockResolvedValue({ data: null, error: null }) }),
           }),
         }),
       }

@@ -2,12 +2,33 @@ import type { FastifyPluginAsync } from 'fastify'
 import { z } from 'zod'
 import { insertNotification } from '@/services/notification.service'
 import { requireRoles } from '@/plugins/authorize'
+import { getSignedUrl } from '@/services/storage.service'
+import { record as recordAuditEvent } from '@/services/audit-log.service'
 
-const jobBody = z.object({
+// Sub-plano 01 (épico ajustes-cliente-2026-09), item 1: 10 tipos de serviço
+// novos (slugs), substituindo os 2 antigos ('maintenance'/'implementation' —
+// dados legados viram NULL na migration, ver
+// supabase/migrations/030_pc_os_vinculo_direto.sql). Mantido em sincronia
+// manual com `JobType` em src/types/index.ts (mesmo padrão de acoplamento
+// solto já usado por `JobStatus`, que também não é validado via zod aqui).
+const jobTypeEnum = z.enum([
+  'pre_commissioning', 'commissioning', 'pre_taf', 'taf', 'technical_visit',
+  'field_survey', 'studies', 'bench_tests', 'energization_support', 'development',
+])
+
+// Sub-plano 01, item 4: separa create de update (antes o PUT reusava o mesmo
+// schema completo do POST, exigindo reenviar TODOS os campos até pra editar
+// um só — bloqueava completar a OS "esqueleto" nascida do aceite de PC aos
+// poucos). `jobUpdateBody` é um `.partial()` puro de `jobCreateBody` — sem
+// `.refine()` em nenhum dos dois, então o gap zod v4 .partial()+.refine() não
+// se aplica aqui (ver supabase/migrations/027_fix_proposal_recurring_null.sql
+// pro caso que motivou o cuidado). `description` fica opcional em ambos (a UI
+// deixou de exigi-la, e a OS esqueleto nasce sem ela).
+const jobCreateBody = z.object({
   employee_id: z.string().min(1),
   machine_id: z.string().min(1),
-  job_type: z.enum(['maintenance', 'implementation']),
-  description: z.string().min(1),
+  job_type: jobTypeEnum,
+  description: z.string().optional(),
   scheduled_date: z.string().min(1),
   // Sub-plano: migration 023_job_date_range.sql. Data de fim opcional — ausente
   // significa serviço de um dia só (comportamento atual, sem mudança). O CHECK
@@ -38,17 +59,30 @@ const jobBody = z.object({
   // Múltiplos colaboradores por OS (job_employees) — administrativo, só
   // admin/manager atribuem quem trabalha na OS.
   employee_ids: z.array(z.string().min(1)).optional(),
+  // Sub-plano 01: vínculos com PC/cliente/contrato grande — normalmente já
+  // vêm preenchidos pelo `accept_proposal` (RPC direto, não passa por este
+  // schema), mas o gestor pode setar/corrigir manualmente numa OS existente
+  // (ex.: vincular uma OS avulsa a um contrato grande depois).
+  proposal_id: z.string().optional(),
+  client_id: z.string().optional(),
+  contract_id: z.string().optional(),
 })
 
+const jobUpdateBody = jobCreateBody.partial()
+
 // CRITICAL-01: employee não pode alterar campos administrativos (quem faz o job,
-// em qual máquina, quando está agendado) — só admin/manager, via jobBody completo.
-// Sub-plano 04: employee_ids também é administrativo (define quem está na OS).
-const employeeJobBody = jobBody.omit({
+// em qual máquina, quando está agendado, a quê PC/cliente/contrato pertence) —
+// só admin/manager, via jobUpdateBody completo. Sub-plano 04: employee_ids
+// também é administrativo (define quem está na OS).
+const employeeJobUpdateBody = jobUpdateBody.omit({
   employee_id: true,
   machine_id: true,
   scheduled_date: true,
   scheduled_end_date: true,
   employee_ids: true,
+  proposal_id: true,
+  client_id: true,
+  contract_id: true,
 })
 
 // Sub-plano 04 (fluxo PC-OS), item 4: `employee_id` deixa de ser a única fonte de
@@ -64,6 +98,19 @@ export async function isJobAssignedToEmployee(db: any, jobId: string, employeeId
   if (legacyEmployeeId === employeeId) return true
   const { data } = await db.from('job_employees').select('job_id').eq('job_id', jobId).eq('employee_id', employeeId).maybeSingle()
   return !!data
+}
+
+// Sub-plano 02 (épico ajustes-cliente-2026-09), item 6: wrapper de conveniência
+// pra callers que só têm jobId+employeeId à mão (ex.: reports.ts) e não
+// querem reimplementar a checagem de dupla fonte (employee_id legado OU
+// job_employees) — delega pra `isJobAssignedToEmployee`, única fonte de
+// verdade da regra. Usado por `PATCH /jobs/:id/start` e por
+// `assertJobOwnership` (reports.ts), que hoje só olhava `jobs.employee_id` e
+// ignorava `job_employees` (achado da exploração do sub-plano 02).
+export async function isJobMember(db: any, jobId: string, employeeId: string): Promise<boolean> {
+  const { data: job } = await db.from('jobs').select('employee_id').eq('id', jobId).single()
+  if (!job) return false
+  return isJobAssignedToEmployee(db, jobId, employeeId, job.employee_id)
 }
 
 // CRITICAL-01/07 (IDOR): busca o employee.id do usuário logado e confere se o job
@@ -102,15 +149,22 @@ const jobs: FastifyPluginAsync = async (fastify) => {
   const db = fastify.supabase
   const guard = (fastify as any).authenticate
 
-  // GET /jobs
+  // GET /jobs — suporta ?contractId= (sub-plano 01: front pagina a aba "OS"
+  // da tela do contrato).
   fastify.get('/', { onRequest: [guard] }, async (req: any, reply) => {
-    // `contracts(number, clients(razao_social))`: embed usado só para resolver
-    // client_name na listagem (número da PC/contrato já vem em `jobs.number`,
-    // não precisa duplicar). `jobs.contract_id` tem uma única FK possível para
-    // `contracts`, e `contracts.client_id` uma única FK para `clients` — sem
-    // ambiguidade, não precisa do sufixo `!fkey` usado em employees.
+    // `clients(razao_social)`: embed direto via `jobs.client_id` (sub-plano
+    // 01 — fonte de verdade nova). `contracts(number, clients(razao_social))`
+    // continua servindo de fallback pra OS legadas/sem `client_id` próprio,
+    // que só tinham o cliente resolvido através do contrato. `jobs.client_id`
+    // e `jobs.contract_id` têm cada um uma única FK possível (pra `clients` e
+    // `contracts` respectivamente) — sem ambiguidade, não precisa do sufixo
+    // `!fkey` usado em employees.
+    const { contractId } = req.query as { contractId?: string }
     let query = db.from('jobs')
-      .select(`*, employees!jobs_employee_id_fkey(name), machines(name), contracts(number, clients(razao_social))`)
+      .select(`*, employees!jobs_employee_id_fkey(name), machines(name), clients(razao_social), contracts(number, clients(razao_social))`)
+    if (contractId) {
+      query = (query as any).eq('contract_id', contractId)
+    }
     if (req.user.role === 'employee') {
       // Busca employee_id pelo user_id do JWT
       const { data: emp } = await db.from('employees').select('id').eq('user_id', req.user.id).single()
@@ -132,20 +186,73 @@ const jobs: FastifyPluginAsync = async (fastify) => {
       ...j,
       employee_name: j.employees?.name,
       machine_name: j.machines?.name,
-      client_name: j.contracts?.clients?.razao_social ?? null,
+      client_name: j.clients?.razao_social ?? j.contracts?.clients?.razao_social ?? null,
       employees: undefined,
       machines: undefined,
+      clients: undefined,
       contracts: undefined,
     }))
+  })
+
+  // GET /jobs/calendar?from=&to= — sub-plano 02, item 3: agenda somente leitura,
+  // qualquer role autenticada (sem checagem de ownership — é intencional, o
+  // calendário mostra a OS de TODOS os funcionários, pra dar visão de equipe).
+  // Só campos mínimos (sem valores/dados de contato do cliente) e exclui OS
+  // canceladas. Precisa vir ANTES de `/:id` (mesmo cuidado do padrão já usado
+  // em contracts.ts `/expiring`), senão "calendar" seria capturado como :id.
+  const calendarQuery = z.object({
+    from: z.string().min(1),
+    to: z.string().min(1),
+  })
+  const CALENDAR_MAX_RANGE_DAYS = 62
+
+  fastify.get<{ Querystring: { from?: string; to?: string } }>('/calendar', { onRequest: [guard] }, async (req, reply) => {
+    const parsed = calendarQuery.safeParse(req.query)
+    if (!parsed.success) return reply.status(400).send({ error: parsed.error.flatten() })
+    const { from, to } = parsed.data
+
+    const fromDate = new Date(from)
+    const toDate = new Date(to)
+    if (Number.isNaN(fromDate.getTime()) || Number.isNaN(toDate.getTime())) {
+      return reply.status(400).send({ error: 'Datas inválidas' })
+    }
+    if (toDate < fromDate) {
+      return reply.status(400).send({ error: '"to" deve ser maior ou igual a "from"' })
+    }
+    const rangeDays = Math.ceil((toDate.getTime() - fromDate.getTime()) / 86400000)
+    if (rangeDays > CALENDAR_MAX_RANGE_DAYS) {
+      return reply.status(400).send({ error: `Intervalo máximo de ${CALENDAR_MAX_RANGE_DAYS} dias` })
+    }
+
+    // employees!jobs_employee_id_fkey: assignee legado. job_employees(employees(...)):
+    // múltiplos colaboradores (sub-plano 04). Nenhum campo financeiro/de contato
+    // (contract_value, client_contact_name/phone, address) entra no select.
+    const { data, error } = await db.from('jobs')
+      .select(`id, number, status, job_type, scheduled_date, scheduled_end_date, start_time, end_time, city, state,
+        clients(razao_social), contracts(clients(razao_social)),
+        employees!jobs_employee_id_fkey(id, name, color, photo_path),
+        job_employees(employees(id, name, color, photo_path))`)
+      .gte('scheduled_date', from)
+      .lte('scheduled_date', to)
+      .neq('status', 'cancelled')
+      .order('scheduled_date')
+    if (error) return reply.status(500).send({ error: error.message })
+
+    return Promise.all((data ?? []).map((j: any) => buildCalendarEntry(db, j)))
   })
 
   // GET /jobs/:id — CRITICAL-07 (IDOR): employee só vê job próprio (employee_id legado
   // OU job_employees); 404 (não 403) para não confirmar a existência do job de outro
   // colaborador.
+  //
+  // Sub-plano 01: `proposal_id` agora é FK direta em `jobs` (antes era resolvido
+  // via query reversa em `proposals.job_id`) — vira embed normal, no mesmo
+  // select, junto do cliente (mesma fonte direta + fallback via contrato do
+  // GET /jobs acima).
   fastify.get<{ Params: { id: string } }>('/:id', { onRequest: [guard] }, async (req: any, reply) => {
     const { data, error } = await db.from('jobs')
       .select(
-        `*, employees!jobs_employee_id_fkey(name), machines(name, manual_url), job_employees(employee_id)`,
+        `*, employees!jobs_employee_id_fkey(name), machines(name, manual_url), job_employees(employee_id), clients(razao_social), contracts(clients(razao_social)), proposals(id, number, status)`,
       )
       .eq('id', req.params.id).single()
     if (error || !data) return reply.status(404).send({ error: 'Not found' })
@@ -156,22 +263,19 @@ const jobs: FastifyPluginAsync = async (fastify) => {
       if (!owned) return reply.status(404).send({ error: 'Not found' })
     }
     const employeeIds = ((data as any).job_employees ?? []).map((r: any) => r.employee_id)
-
-    // Vínculo reverso: no máximo uma proposal (PC) aponta para esta OS
-    // (jobs.id é o alvo de proposals.job_id, único por natureza do fluxo
-    // accept_proposal). OS antigas/sem PC de origem simplesmente não têm
-    // proposal correspondente.
-    const { data: proposal } = await db.from('proposals')
-      .select('id, number')
-      .eq('job_id', req.params.id).maybeSingle()
+    const clientName = (data as any).clients?.razao_social ?? (data as any).contracts?.clients?.razao_social ?? null
 
     return {
       ...data,
       employee_name: data.employees?.name,
       machine: data.machines,
       employee_ids: employeeIds,
+      client_name: clientName,
+      proposal: (data as any).proposals ?? null,
       job_employees: undefined,
-      proposal: proposal ?? null,
+      clients: undefined,
+      contracts: undefined,
+      proposals: undefined,
     }
   })
 
@@ -182,7 +286,7 @@ const jobs: FastifyPluginAsync = async (fastify) => {
   // inválida), o Postgres desfaz tudo — nunca fica job sem checklist, ou estoque
   // debitado sem job. Ver supabase/migrations/015_atomic_operations.sql.
   fastify.post('/', { onRequest: [guard, requireRoles('manager', 'admin')] }, async (req, reply) => {
-    const parsed = jobBody.safeParse(req.body)
+    const parsed = jobCreateBody.safeParse(req.body)
     if (!parsed.success) return reply.status(400).send({ error: parsed.error.flatten() })
 
     const { data: result, error } = await db.rpc('create_job_with_provisioning', { p_job: parsed.data })
@@ -208,7 +312,7 @@ const jobs: FastifyPluginAsync = async (fastify) => {
   // administrativos (employee_id, machine_id, scheduled_date ficam restritos a admin/manager).
   fastify.put<{ Params: { id: string } }>('/:id', { onRequest: [guard] }, async (req: any, reply) => {
     const isAdminOrManager = ['admin', 'manager'].includes(req.user.role)
-    const schema = isAdminOrManager ? jobBody : employeeJobBody
+    const schema = isAdminOrManager ? jobUpdateBody : employeeJobUpdateBody
     const parsed = schema.safeParse(req.body)
     if (!parsed.success) return reply.status(400).send({ error: parsed.error.flatten() })
 
@@ -219,7 +323,7 @@ const jobs: FastifyPluginAsync = async (fastify) => {
     // Campos opcionais tipados (uuid/date) chegam como '' do frontend quando
     // vazios — o Postgres rejeita '' pra esses tipos (22P02/22007: invalid
     // input syntax). '' significa "sem valor", equivalente a null.
-    for (const field of ['bag_id', 'scheduled_end_date'] as const) {
+    for (const field of ['bag_id', 'scheduled_end_date', 'proposal_id', 'client_id', 'contract_id'] as const) {
       if ((jobFields as any)[field] === '') (jobFields as any)[field] = null
     }
 
@@ -229,7 +333,7 @@ const jobs: FastifyPluginAsync = async (fastify) => {
 
     // Sub-plano 04, item 4/12: substitui os colaboradores atribuídos à OS
     // quando o gestor envia employee_ids. Só é enviado por admin/manager
-    // (employeeJobBody, usado pelo employee, omite o campo inteiro).
+    // (employeeJobUpdateBody, usado pelo employee, omite o campo inteiro).
     if (employee_ids) {
       await db.from('job_employees').delete().eq('job_id', req.params.id)
       if (employee_ids.length > 0) {
@@ -240,6 +344,44 @@ const jobs: FastifyPluginAsync = async (fastify) => {
     }
 
     return data
+  })
+
+  // PATCH /jobs/:id/start — sub-plano 02, item 4: transição scheduled|pending
+  // -> in_progress. Permitido a admin/manager e a qualquer colaborador
+  // vinculado à OS (employee_id legado OU job_employees — já temos
+  // `job.employee_id` deste select, então chama `isJobAssignedToEmployee`
+  // direto, mesmo padrão de `loadOwnedJob` acima; `isJobMember` — que faz
+  // essa mesma checagem sem exigir o employee_id em mãos — existe pra quem
+  // não tem o job pré-carregado, ex. reports.ts). 404 (não 403) pro employee
+  // sem vínculo, mesmo padrão IDOR do resto do arquivo. 409 fora de
+  // scheduled/pending.
+  fastify.patch<{ Params: { id: string } }>('/:id/start', { onRequest: [guard] }, async (req: any, reply) => {
+    const { data: job, error } = await db.from('jobs').select('id, status, employee_id').eq('id', req.params.id).single()
+    if (error || !job) return reply.status(404).send({ error: 'Not found' })
+
+    if (req.user.role === 'employee') {
+      const { data: emp } = await db.from('employees').select('id').eq('user_id', req.user.id).single()
+      if (!emp) return reply.status(404).send({ error: 'Not found' })
+      const member = await isJobAssignedToEmployee(db, job.id, emp.id, job.employee_id)
+      if (!member) return reply.status(404).send({ error: 'Not found' })
+    } else if (!['admin', 'manager'].includes(req.user.role)) {
+      return reply.status(403).send({ error: 'Acesso negado' })
+    }
+
+    if (!['scheduled', 'pending'].includes(job.status)) {
+      return reply.status(409).send({ error: `OS não pode ser iniciada no status atual (${job.status})` })
+    }
+
+    const { data: updated, error: updateError } = await db.from('jobs')
+      .update({ status: 'in_progress', updated_at: new Date().toISOString() })
+      .eq('id', req.params.id).select().single()
+    if (updateError || !updated) return reply.status(500).send({ error: updateError?.message ?? 'Falha ao iniciar OS' })
+
+    await recordAuditEvent(db, {
+      entityType: 'job', entityId: req.params.id, actorId: req.user.id,
+      action: 'job.started', metadata: { from: job.status, to: 'in_progress' },
+    })
+    return updated
   })
 
   // PATCH /jobs/:id/cancel — CRITICAL-01 (IDOR): employee só cancela job próprio.
@@ -333,6 +475,48 @@ const jobs: FastifyPluginAsync = async (fastify) => {
     if (error) return reply.status(500).send({ error: error.message })
     return reply.status(201).send(data)
   })
+}
+
+// Sub-plano 02, item 3: monta uma entrada do calendário a partir da linha crua
+// do select de GET /jobs/calendar — junta o assignee legado (employees!fkey)
+// com os colaboradores de job_employees (deduplicados por id, um funcionário
+// pode em teoria aparecer nas duas fontes) e resolve `photo_url` assinada
+// (TTL curto) pra cada um. Falha ao assinar a foto de um funcionário não
+// derruba a linha inteira — cai pra null.
+async function buildCalendarEntry(db: any, j: any) {
+  const clientName = j.clients?.razao_social ?? j.contracts?.clients?.razao_social ?? null
+
+  const byId = new Map<string, any>()
+  if (j.employees) byId.set(j.employees.id, j.employees)
+  for (const link of j.job_employees ?? []) {
+    if (link.employees) byId.set(link.employees.id, link.employees)
+  }
+
+  const employees = await Promise.all(
+    Array.from(byId.values()).map(async (e: any) => ({
+      id: e.id,
+      name: e.name,
+      color: e.color ?? null,
+      photo_url: e.photo_path
+        ? await getSignedUrl(db, 'employee-photos', e.photo_path).catch(() => null)
+        : null,
+    })),
+  )
+
+  return {
+    id: j.id,
+    number: j.number ?? null,
+    status: j.status,
+    job_type: j.job_type,
+    scheduled_date: j.scheduled_date,
+    scheduled_end_date: j.scheduled_end_date ?? null,
+    start_time: j.start_time,
+    end_time: j.end_time,
+    city: j.city,
+    state: j.state,
+    client_name: clientName,
+    employees,
+  }
 }
 
 // CRITICAL-01/9: ajuste atômico de estoque via RPC `adjust_tool_stock` — um único

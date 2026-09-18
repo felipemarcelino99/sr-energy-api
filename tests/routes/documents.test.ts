@@ -290,6 +290,45 @@ describe('POST /documents/generate-report/:id', () => {
     expect(res.json().documentId).toBe('doc-1')
   })
 
+  // Sub-plano 01 (épico ajustes-cliente-2026-09): jobs.client_id é a fonte de
+  // verdade nova — resolve o cliente sem precisar de contract_id.
+  it('resolve o cliente via jobs.client_id direto, sem tocar em contracts', async () => {
+    const app = await buildDocumentsApp()
+    const fromSpy = jest.fn()
+    mockSupabase.storage.from.mockReturnValue({
+      upload: jest.fn().mockResolvedValue({ error: null, data: { path: 'x' } }),
+      createSignedUrl: jest.fn().mockResolvedValue({ data: { signedUrl: 'https://signed/x' }, error: null }),
+    })
+    mockSupabase.from.mockImplementation((table: string) => {
+      fromSpy(table)
+      if (table === 'clients') {
+        return { select: () => ({ eq: () => ({ single: () => Promise.resolve({ data: { razao_social: 'Cliente Direto' }, error: null }) }) }) }
+      }
+      if (table === 'jobs') {
+        return { select: () => ({ eq: () => ({ single: () => Promise.resolve({ data: { id: jobId, number: '26001', description: 'Comissionamento', scheduled_date: '2026-08-20', city: 'SP', state: 'SP', employee_id: 'emp-1', contract_id: null, client_id: 'cli-1' }, error: null }) }) }) }
+      }
+      if (table === 'job_reports') {
+        return { select: () => ({ eq: () => ({ single: () => Promise.resolve({ data: { content: 'Tudo certo', evidences: [] }, error: null }) }) }) }
+      }
+      if (table === 'employees') {
+        return { select: () => ({ eq: () => ({ single: () => Promise.resolve({ data: { name: 'João' }, error: null }) }) }) }
+      }
+      if (table === 'documents') {
+        return { insert: () => ({ select: () => ({ single: () => Promise.resolve({ data: { id: 'doc-1', storage_kind: 'internal' }, error: null }) }) }) }
+      }
+      if (table === 'audit_log') {
+        return { insert: jest.fn().mockResolvedValue({ data: null, error: null }) }
+      }
+      return {}
+    })
+
+    const res = await app.inject({
+      method: 'POST', url: `/documents/generate-report/${jobId}`, headers: { 'x-test-user': mgr },
+    })
+    expect(res.statusCode).toBe(201)
+    expect(fromSpy).not.toHaveBeenCalledWith('contracts')
+  })
+
   it('404 quando o job não existe', async () => {
     const app = await buildDocumentsApp()
     mockJobAndReportChain({ job: null })

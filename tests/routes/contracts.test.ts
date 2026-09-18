@@ -60,41 +60,23 @@ describe('GET /contracts', () => {
 describe('GET /contracts/:id', () => {
   const id = '11111111-1111-1111-1111-111111111111'
 
-  it('retorna o contrato com proposal: null quando é um contrato manual (sem PC de origem)', async () => {
+  // Sub-plano 01 (épico ajustes-cliente-2026-09): o embed reverso único de
+  // `proposal` saiu — `proposals.contract_id` deixou de ser 1:1 (várias PCs
+  // podem escolher o mesmo Contrato grande). Quem lista as PCs/OS vinculadas
+  // a um contrato agora é `GET /proposals?contractId=` e `GET /jobs?contractId=`
+  // (ver tests/routes/proposals.test.ts e tests/routes/jobs.test.ts).
+  it('retorna o contrato sem tocar na tabela proposals', async () => {
     const app = buildApp()
     app.register(contractsRoute, { prefix: '/contracts' })
     await app.ready()
-    mockSupabase.from.mockImplementation((table: string) => {
-      if (table === 'contracts') {
-        return { select: jest.fn().mockReturnValue({ eq: jest.fn().mockReturnValue({ single: jest.fn().mockResolvedValue({ data: { id }, error: null }) }) }) }
-      }
-      if (table === 'proposals') {
-        return { select: jest.fn().mockReturnValue({ eq: jest.fn().mockReturnValue({ maybeSingle: jest.fn().mockResolvedValue({ data: null, error: null }) }) }) }
-      }
-      throw new Error(`unexpected table ${table}`)
+    const fromSpy = jest.fn().mockReturnValue({
+      select: jest.fn().mockReturnValue({ eq: jest.fn().mockReturnValue({ single: jest.fn().mockResolvedValue({ data: { id }, error: null }) }) }),
     })
+    mockSupabase.from.mockImplementation(fromSpy)
     const res = await app.inject({ method: 'GET', url: `/contracts/${id}`, headers: { 'x-test-user': mgr } })
     expect(res.statusCode).toBe(200)
-    expect(res.json().proposal).toBeNull()
-  })
-
-  it('retorna o contrato com a proposal (PC) de origem quando existir', async () => {
-    const app = buildApp()
-    app.register(contractsRoute, { prefix: '/contracts' })
-    await app.ready()
-    const proposal = { id: 'p-1', number: 'PC-0001' }
-    mockSupabase.from.mockImplementation((table: string) => {
-      if (table === 'contracts') {
-        return { select: jest.fn().mockReturnValue({ eq: jest.fn().mockReturnValue({ single: jest.fn().mockResolvedValue({ data: { id }, error: null }) }) }) }
-      }
-      if (table === 'proposals') {
-        return { select: jest.fn().mockReturnValue({ eq: jest.fn().mockReturnValue({ maybeSingle: jest.fn().mockResolvedValue({ data: proposal, error: null }) }) }) }
-      }
-      throw new Error(`unexpected table ${table}`)
-    })
-    const res = await app.inject({ method: 'GET', url: `/contracts/${id}`, headers: { 'x-test-user': mgr } })
-    expect(res.statusCode).toBe(200)
-    expect(res.json().proposal).toEqual(proposal)
+    expect(res.json().proposal).toBeUndefined()
+    expect(fromSpy).not.toHaveBeenCalledWith('proposals')
   })
 
   it('404 quando não encontrado', async () => {

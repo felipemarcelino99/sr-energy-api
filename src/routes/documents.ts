@@ -156,8 +156,12 @@ const documents: FastifyPluginAsync = async (fastify) => {
     '/generate-report/:id',
     { onRequest: [guard, adminOrManager], schema: { params: uuidParams } },
     async (req: any, reply) => {
+      // Sub-plano 01 (épico ajustes-cliente-2026-09): resolve o cliente por
+      // `jobs.client_id` primeiro (fonte de verdade nova, ver
+      // supabase/migrations/030_pc_os_vinculo_direto.sql) — só cai pro
+      // contrato (`jobs.contract_id`) em OS legadas/sem `client_id` próprio.
       const { data: job, error: jobError } = await db.from('jobs')
-        .select('id, number, description, scheduled_date, city, state, employee_id, contract_id')
+        .select('id, number, description, scheduled_date, city, state, employee_id, contract_id, client_id')
         .eq('id', req.params.id).single()
       if (jobError || !job) return reply.status(404).send({ error: 'Not found' })
 
@@ -166,18 +170,21 @@ const documents: FastifyPluginAsync = async (fastify) => {
         .eq('job_id', req.params.id).single()
       if (reportError || !report) return reply.status(404).send({ error: 'Relatório da OS ainda não foi enviado' })
 
-      const [{ data: employee }, { data: contract }] = await Promise.all([
+      const [{ data: employee }, { data: client }, { data: contract }] = await Promise.all([
         job.employee_id
           ? db.from('employees').select('name').eq('id', job.employee_id).single()
           : Promise.resolve({ data: null }),
-        job.contract_id
+        job.client_id
+          ? db.from('clients').select('razao_social').eq('id', job.client_id).single()
+          : Promise.resolve({ data: null }),
+        !job.client_id && job.contract_id
           ? db.from('contracts').select('clients(razao_social)').eq('id', job.contract_id).single()
           : Promise.resolve({ data: null }),
       ])
 
       const documentId = await generateReportPdf(db, req.params.id, {
         jobNumber: job.number ?? req.params.id,
-        clientName: (contract?.clients as any)?.razao_social ?? (contract?.clients as any)?.[0]?.razao_social ?? 'N/A',
+        clientName: (client as any)?.razao_social ?? (contract?.clients as any)?.razao_social ?? (contract?.clients as any)?.[0]?.razao_social ?? 'N/A',
         description: job.description ?? '',
         scheduledDate: job.scheduled_date ?? 'N/A',
         city: job.city ?? 'N/A',

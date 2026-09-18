@@ -5,7 +5,9 @@ import type { SupabaseClient } from '@supabase/supabase-js'
 // expor URL pública permanente — usamos createSignedUrl com TTL curto.
 const SIGNED_URL_TTL_SECONDS = 60 * 60 // 1h — tempo suficiente para o front consumir a URL
 
-const SIGNED_BUCKETS = new Set(['contract-files', 'bag-certificates', 'evidences', 'documents'])
+// Sub-plano 02: 'employee-photos' — bucket privado com foto de perfil do
+// funcionário (mesma razão dos demais: nunca URL pública permanente).
+const SIGNED_BUCKETS = new Set(['contract-files', 'bag-certificates', 'evidences', 'documents', 'employee-photos'])
 
 export async function uploadFile(
   supabase: SupabaseClient,

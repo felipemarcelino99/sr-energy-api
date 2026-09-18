@@ -33,8 +33,11 @@ const uuidParams = {
 // Sub-plano 04 (fluxo PC-OS), revisão: `status` saiu de `contracts` — a Proposta
 // Comercial (PC) agora vive em `proposals` (ver
 // supabase/migrations/021_proposals_split.sql). `contracts` só existe como
-// contrato real (criado manualmente aqui, ou automaticamente por
-// `accept_proposal` — ver src/routes/proposals.ts).
+// contrato real, sempre criado manualmente aqui (fluxo de locação/contrato
+// grande) — desde o sub-plano 01 (ajustes-cliente-2026-09), aceitar uma PC
+// não cria mais Contrato automaticamente (ver
+// supabase/migrations/030_pc_os_vinculo_direto.sql). Uma ou mais PCs podem
+// escolher se vincular a um Contrato já existente via `proposals.contract_id`.
 const SELECT_CONTRACT = 'id, client_id, number, description, start_date, end_date, contract_type, contract_value, recurring, file_url, created_at, updated_at, clients(id, razao_social, cnpj)'
 
 const contracts: FastifyPluginAsync = async (fastify) => {
@@ -65,6 +68,13 @@ const contracts: FastifyPluginAsync = async (fastify) => {
     return data
   })
 
+  // Sub-plano 01 (épico ajustes-cliente-2026-09): `proposals.contract_id` deixou
+  // de ser 1:1 (aceitar uma PC não cria mais um Contrato exclusivo pra ela —
+  // várias PCs podem escolher o MESMO Contrato grande, ver
+  // supabase/migrations/030_pc_os_vinculo_direto.sql). O embed reverso único
+  // (`.maybeSingle()`) saiu por isso: quem lista as PCs/OS vinculadas a um
+  // contrato agora é `GET /proposals?contractId=` e `GET /jobs?contractId=`
+  // (decisão de escopo: filtros, pro front paginar cada aba).
   fastify.get<{ Params: { id: string } }>(
     '/:id',
     { onRequest: [guard], schema: { params: uuidParams } },
@@ -73,16 +83,7 @@ const contracts: FastifyPluginAsync = async (fastify) => {
         .select(SELECT_CONTRACT)
         .eq('id', req.params.id).single()
       if (error || !data) return reply.status(404).send({ error: 'Not found' })
-
-      // Vínculo reverso: no máximo uma proposal (PC) aponta para este contrato
-      // (contracts.id é o alvo de proposals.contract_id, único por natureza do
-      // fluxo accept_proposal). Contratos manuais (locação, sem PC de origem)
-      // simplesmente não têm proposal correspondente.
-      const { data: proposal } = await db.from('proposals')
-        .select('id, number')
-        .eq('contract_id', req.params.id).maybeSingle()
-
-      return { ...data, proposal: proposal ?? null }
+      return data
     },
   )
 
