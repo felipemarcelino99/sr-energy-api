@@ -248,11 +248,15 @@ const jobs: FastifyPluginAsync = async (fastify) => {
   // Sub-plano 01: `proposal_id` agora é FK direta em `jobs` (antes era resolvido
   // via query reversa em `proposals.job_id`) — vira embed normal, no mesmo
   // select, junto do cliente (mesma fonte direta + fallback via contrato do
-  // GET /jobs acima).
+  // GET /jobs acima). `proposals` precisa do hint `!jobs_proposal_id_fkey`
+  // porque a migration 030 deixou DUAS FKs possíveis entre jobs e proposals
+  // (a nova `jobs.proposal_id` e a legada `proposals.job_id`) — sem o hint, o
+  // PostgREST não desambigua e a rota inteira cai com 500 (achado ao validar
+  // contra Postgres real; os testes Jest usam mock e não pegam isso).
   fastify.get<{ Params: { id: string } }>('/:id', { onRequest: [guard] }, async (req: any, reply) => {
     const { data, error } = await db.from('jobs')
       .select(
-        `*, employees!jobs_employee_id_fkey(name), machines(name, manual_url), job_employees(employee_id), clients(razao_social), contracts(clients(razao_social)), proposals(id, number, status)`,
+        `*, employees!jobs_employee_id_fkey(name), machines(name, manual_url), job_employees(employee_id), clients(razao_social), contracts(clients(razao_social)), proposals!jobs_proposal_id_fkey(id, number, status)`,
       )
       .eq('id', req.params.id).single()
     if (error || !data) return reply.status(404).send({ error: 'Not found' })

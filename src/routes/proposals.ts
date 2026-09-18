@@ -42,14 +42,19 @@ const uuidParams = {
 // vem null, sem custo extra de query) e do Contrato grande vinculado
 // manualmente, quando houver (`contract_id`, sub-plano 01 — não é mais
 // gerado automaticamente no aceite, por isso o embed fica enxuto, só pra
-// identificar "qual contrato"). `employees` dentro de `jobs` precisa do hint
-// `!fkey` porque job tem duas FKs possíveis pra employees (employee_id
-// legado + job_employees) — mesmo achado já resolvido em jobs.ts.
+// identificar "qual contrato"). `jobs` precisa do hint `!proposals_job_id_fkey`
+// porque a migration 030 criou `jobs.proposal_id` (FK nova, jobs -> proposals),
+// então agora há DUAS FKs possíveis entre as tabelas — sem o hint, o
+// PostgREST não sabe se deve seguir `proposals.job_id` (o que queremos aqui)
+// ou a nova `jobs.proposal_id`, e responde 500 ("more than one relationship
+// was found"). `employees` dentro de `jobs` também precisa do hint `!fkey`
+// porque job tem duas FKs possíveis pra employees (employee_id legado +
+// job_employees) — mesmo achado já resolvido em jobs.ts.
 const SELECT_PROPOSAL =
   'id, number, client_id, description, contract_type, contract_value, recurring, start_date, file_url, status, contract_id, job_id, created_at, updated_at, ' +
   'clients(id, razao_social, cnpj), ' +
   'contracts(id, number), ' +
-  'jobs(id, number, status, scheduled_date, scheduled_end_date, city, state, employees!jobs_employee_id_fkey(name), machines(name))'
+  'jobs!proposals_job_id_fkey(id, number, status, scheduled_date, scheduled_end_date, city, state, employees!jobs_employee_id_fkey(name), machines(name))'
 
 // Sub-plano 01: `contract_id` é opcional, mas quando informado precisa
 // apontar pra um Contrato do MESMO cliente da PC — senão a PC apareceria
